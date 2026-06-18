@@ -1,0 +1,25 @@
+# Environment & secrets — never commit these
+.env
+service-account.json
+*.json.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/

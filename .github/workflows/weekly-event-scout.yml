@@ -1,0 +1,56 @@
+name: Weekly Event Scout
+
+on:
+  # Runs every Monday at 08:00 UTC
+  schedule:
+    - cron: "0 8 * * 1"
+
+  # Allow manual trigger from the GitHub Actions UI at any time
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (skip writing to Google Sheets)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  scout:
+    name: Scrape, classify, and update sheet
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run event scout agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
+          # Store your full service account JSON as a single GitHub secret
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SHEET_NAME: "Events"
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: python main.py
+
+      - name: Upload run log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scout-failure-log
+          path: "*.log"
+          retention-days: 7
