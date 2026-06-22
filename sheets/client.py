@@ -175,6 +175,45 @@ class SheetsClient:
         logger.info(f"'{excluded_sheet}': {len(names)} excluded events loaded")
         return names, urls
 
+    def get_excluded_events_full(self, excluded_sheet: str = "Excluded") -> list[dict]:
+        """
+        Read the full Excluded sheet and return a list of dicts with all
+        available fields for each excluded event.
+
+        This richer data is passed to Claude so it can reason about *why*
+        events were excluded and derive patterns to apply to new events —
+        not just block exact name matches.
+        """
+        try:
+            result = self.sheet.values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{excluded_sheet}'!A:{LAST_COL}",
+            ).execute()
+        except HttpError as e:
+            logger.error(f"Failed to read full Excluded sheet: {e}")
+            return []
+
+        rows = result.get("values", [])
+        if len(rows) < 2:
+            return []  # Empty or header-only
+
+        header = [h.strip().lower() for h in rows[0]]
+
+        events = []
+        for row in rows[1:]:
+            # Pad short rows so index access is safe
+            padded = row + [""] * (len(header) - len(row))
+            ev = {}
+            for i, col in enumerate(header):
+                if col:
+                    ev[col] = padded[i].strip()
+            # Only include rows that have at least a name
+            if ev.get("name"):
+                events.append(ev)
+
+        logger.info(f"'{excluded_sheet}': loaded {len(events)} full excluded event records")
+        return events
+
     def ensure_header(self) -> None:
         """
         Write the header row starting at B1 (column A stays empty).

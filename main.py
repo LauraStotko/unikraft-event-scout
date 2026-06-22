@@ -145,13 +145,15 @@ def run() -> None:
         return
 
     # ── Step 3: Load the Excluded sheet ──────────────────────────────────────
-    # Use a throwaway SheetsClient pointed at the Excluded tab to read
-    # what your team has already marked as not interesting.
-    # On a dry run we skip this (no Sheets credentials needed).
+    # Read two things from the Excluded tab:
+    #   a) exact name + URL sets  → fast hard blocks before any Claude call
+    #   b) full row data          → passed to Claude to derive patterns, so the
+    #      agent learns to reject similar events it has never seen before
     excluded_names: set[str] = set()
     excluded_urls: set[str] = set()
+    excluded_events_full: list[dict] = []
 
-    if not DRY_RUN and SPREADSHEET_ID:
+    if SPREADSHEET_ID:
         try:
             excl_client = SheetsClient(
                 spreadsheet_id=SPREADSHEET_ID,
@@ -160,15 +162,28 @@ def run() -> None:
             excluded_names, excluded_urls = excl_client.get_excluded_names_and_urls(
                 excluded_sheet=EXCLUDED_SHEET
             )
+            excluded_events_full = excl_client.get_excluded_events_full(
+                excluded_sheet=EXCLUDED_SHEET
+            )
+            logger.info(
+                f"Excluded sheet: {len(excluded_names)} events loaded "
+                f"({len(excluded_events_full)} with full data for pattern learning)"
+            )
         except Exception as e:
             logger.warning(f"Could not read Excluded sheet — continuing without it: {e}")
 
     # ── Step 4: Classify with Claude ─────────────────────────────────────────
+    # Claude will:
+    #   1. Derive exclusion patterns from the full excluded event list (1 API call)
+    #   2. Build a pattern-aware system prompt
+    #   3. Use that prompt to classify every new event — catching not just exact
+    #      matches but any event that resembles what your team has rejected before
     classified = classify_batch(
         all_raw,
         max_events=80,
         excluded_names=excluded_names,
         excluded_urls=excluded_urls,
+        excluded_events_full=excluded_events_full,
     )
     logger.info(f"Relevant events after classification: {len(classified)}")
 
@@ -189,9 +204,13 @@ def run() -> None:
         logger.info(f"  → '{CONFERENCES_SHEET}' ({len(conferences)} events):")
         for ev in conferences:
             logger.info(f"      • {ev.get('name')} | {ev.get('start_date')} | {ev.get('location')}")
+            if ev.get("relevance_note"):
+                logger.info(f"        ↳ {ev.get('relevance_note')}")
         logger.info(f"  → '{MEETUPS_SHEET}' ({len(meetups)} events):")
         for ev in meetups:
             logger.info(f"      • {ev.get('name')} | {ev.get('start_date')} | {ev.get('location')}")
+            if ev.get("relevance_note"):
+                logger.info(f"        ↳ {ev.get('relevance_note')}")
         return
 
     # Write conferences
