@@ -137,22 +137,56 @@ def classify_event(raw_event: dict) -> Optional[dict]:
     return result
 
 
-def classify_batch(raw_events: list[dict], max_events: int = 60) -> list[dict]:
+def classify_batch(
+    raw_events: list[dict],
+    max_events: int = 80,
+    excluded_names: set[str] | None = None,
+    excluded_urls: set[str] | None = None,
+) -> list[dict]:
     """
     Classify a batch of raw events.
-    Caps at max_events to control API costs on any single run.
-    Returns only relevant, structured events.
+
+    Before sending each event to Claude, checks it against the Excluded sheet:
+    if the event name or URL matches anything your team has marked as excluded,
+    it is silently skipped — no API call is made for it.
+
+    Over time, as your team adds events to the Excluded sheet, the agent
+    automatically learns which types of events are not worth surfacing.
+
+    Args:
+        raw_events:      List of raw scraped event dicts.
+        max_events:      Cap to control API costs per run.
+        excluded_names:  Lowercased event names from the Excluded sheet.
+        excluded_urls:   Lowercased event URLs from the Excluded sheet.
+
+    Returns only relevant, non-excluded, structured events.
     """
+    excluded_names = excluded_names or set()
+    excluded_urls = excluded_urls or set()
     classified = []
+    skipped_excluded = 0
     total = min(len(raw_events), max_events)
 
-    logger.info(f"Classifying {total} events with Claude...")
+    logger.info(f"Classifying up to {total} events with Claude "
+                f"({len(excluded_names)} excluded events on blocklist)...")
 
     for i, ev in enumerate(raw_events[:max_events]):
+        name = ev.get("name", "").strip().lower()
+        url = ev.get("website", "").strip().lower()
+
+        # Skip anything your team has already marked as not interesting
+        if name in excluded_names or url in excluded_urls:
+            logger.debug(f"Skipping excluded event: {ev.get('name')}")
+            skipped_excluded += 1
+            continue
+
         logger.debug(f"  [{i+1}/{total}] {ev.get('name', 'unknown')}")
         result = classify_event(ev)
         if result:
             classified.append(result)
 
-    logger.info(f"Classification complete: {len(classified)} relevant events found")
+    logger.info(
+        f"Classification complete: {len(classified)} relevant events found "
+        f"({skipped_excluded} skipped from Excluded sheet)"
+    )
     return classified

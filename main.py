@@ -23,6 +23,7 @@ Optional:
   SLACK_WEBHOOK_URL             (if you want weekly Slack summaries)
   CONFERENCES_SHEET             (tab name for conferences, defaults to "Conferences")
   MEETUPS_SHEET                 (tab name for meetups, defaults to "Meet-ups")
+  EXCLUDED_SHEET                (tab name for excluded events, defaults to "Excluded")
   DRY_RUN                       (set to "true" to skip writing to sheet)
 """
 
@@ -56,6 +57,7 @@ logger = logging.getLogger("unikraft-event-agent")
 SPREADSHEET_ID = os.environ.get("GOOGLE_SPREADSHEET_ID", "")
 CONFERENCES_SHEET = os.environ.get("CONFERENCES_SHEET", "Conferences")
 MEETUPS_SHEET = os.environ.get("MEETUPS_SHEET", "Meet-ups")
+EXCLUDED_SHEET = os.environ.get("EXCLUDED_SHEET", "Excluded")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 
@@ -142,8 +144,32 @@ def run() -> None:
         logger.warning("No events scraped from any source. Check network or site structure changes.")
         return
 
-    # ── Step 3: Classify with Claude ─────────────────────────────────────────
-    classified = classify_batch(all_raw, max_events=80)
+    # ── Step 3: Load the Excluded sheet ──────────────────────────────────────
+    # Use a throwaway SheetsClient pointed at the Excluded tab to read
+    # what your team has already marked as not interesting.
+    # On a dry run we skip this (no Sheets credentials needed).
+    excluded_names: set[str] = set()
+    excluded_urls: set[str] = set()
+
+    if not DRY_RUN and SPREADSHEET_ID:
+        try:
+            excl_client = SheetsClient(
+                spreadsheet_id=SPREADSHEET_ID,
+                sheet_name=EXCLUDED_SHEET,
+            )
+            excluded_names, excluded_urls = excl_client.get_excluded_names_and_urls(
+                excluded_sheet=EXCLUDED_SHEET
+            )
+        except Exception as e:
+            logger.warning(f"Could not read Excluded sheet — continuing without it: {e}")
+
+    # ── Step 4: Classify with Claude ─────────────────────────────────────────
+    classified = classify_batch(
+        all_raw,
+        max_events=80,
+        excluded_names=excluded_names,
+        excluded_urls=excluded_urls,
+    )
     logger.info(f"Relevant events after classification: {len(classified)}")
 
     if not classified:
@@ -151,13 +177,13 @@ def run() -> None:
         _post_slack_summary([], len(all_raw))
         return
 
-    # ── Step 4: Split into conferences vs meetups ─────────────────────────────
+    # ── Step 5: Split into conferences vs meetups ─────────────────────────────
     conferences = [ev for ev in classified if ev.get("event_type") == "conference"]
     meetups = [ev for ev in classified if ev.get("event_type") == "meetup"]
 
     logger.info(f"Split: {len(conferences)} conferences, {len(meetups)} meetups")
 
-    # ── Step 5: Write to Google Sheets ───────────────────────────────────────
+    # ── Step 6: Write to Google Sheets ───────────────────────────────────────
     if DRY_RUN:
         logger.info("DRY RUN — skipping Google Sheets write. Events that would be added:")
         logger.info(f"  → '{CONFERENCES_SHEET}' ({len(conferences)} events):")
@@ -181,7 +207,7 @@ def run() -> None:
     total_written = written_conf + written_meetups
     logger.info(f"Done. {written_conf} conferences → '{CONFERENCES_SHEET}', {written_meetups} meetups → '{MEETUPS_SHEET}'.")
 
-    # ── Step 6: Post Slack summary ────────────────────────────────────────────
+    # ── Step 7: Post Slack summary ────────────────────────────────────────────
     all_written = conferences[:written_conf] + meetups[:written_meetups]
     _post_slack_summary(all_written, len(all_raw))
 
