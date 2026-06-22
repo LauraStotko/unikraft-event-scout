@@ -3,10 +3,11 @@ main.py — Unikraft Event Scout Agent
 
 Orchestrates the full pipeline:
   1. Scrape events from Luma, Techmeme, CNCF / Linux Foundation
-  2. Classify each event with Claude (relevance + structured fields)
-  3. Deduplicate against existing Google Sheet rows
-  4. Append new events to the sheet
-  5. (Optional) Post a Slack summary
+  2. Classify each event with Claude (relevance + structured fields + event_type)
+  3. Split into conferences and meetups
+  4. Deduplicate against existing rows in each tab
+  5. Append new conferences → "Conferences" tab, meetups → "Meet-ups" tab
+  6. (Optional) Post a Slack summary
 
 Usage:
   python main.py
@@ -20,7 +21,8 @@ Environment variables required (see .env.example):
 
 Optional:
   SLACK_WEBHOOK_URL             (if you want weekly Slack summaries)
-  SHEET_NAME                    (defaults to "Events")
+  CONFERENCES_SHEET             (tab name for conferences, defaults to "Conferences")
+  MEETUPS_SHEET                 (tab name for meetups, defaults to "Meet-ups")
   DRY_RUN                       (set to "true" to skip writing to sheet)
 """
 
@@ -52,7 +54,8 @@ logger = logging.getLogger("unikraft-event-agent")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 SPREADSHEET_ID = os.environ.get("GOOGLE_SPREADSHEET_ID", "")
-SHEET_NAME = os.environ.get("SHEET_NAME", "Events")
+CONFERENCES_SHEET = os.environ.get("CONFERENCES_SHEET", "Conferences")
+MEETUPS_SHEET = os.environ.get("MEETUPS_SHEET", "Meet-ups")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 
@@ -69,15 +72,27 @@ def _post_slack_summary(new_events: list[dict], total_scraped: int) -> None:
     if count == 0:
         text = "🔍 *Unikraft Event Scout* — weekly run complete. No new events found this week."
     else:
+        conferences = [e for e in new_events if e.get("event_type") == "conference"]
+        meetups = [e for e in new_events if e.get("event_type") == "meetup"]
         lines = [f"🗓️ *Unikraft Event Scout* — {count} new event{'s' if count != 1 else ''} added to the tracker:"]
-        for ev in new_events[:10]:  # cap at 10 to keep message readable
-            date_str = ev.get("start_date", "TBC")
-            loc = ev.get("location", "")
-            name = ev.get("name", "")
-            url = ev.get("website", "")
-            lines.append(f"  • <{url}|{name}> — {date_str}, {loc}")
-        if count > 10:
-            lines.append(f"  _…and {count - 10} more. <https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}|View full sheet>_")
+        if conferences:
+            lines.append(f"\n*Conferences ({len(conferences)}):*")
+            for ev in conferences[:8]:
+                date_str = ev.get("start_date", "TBC")
+                loc = ev.get("location", "")
+                name = ev.get("name", "")
+                url = ev.get("website", "")
+                lines.append(f"  • <{url}|{name}> — {date_str}, {loc}")
+        if meetups:
+            lines.append(f"\n*Meetups ({len(meetups)}):*")
+            for ev in meetups[:8]:
+                date_str = ev.get("start_date", "TBC")
+                loc = ev.get("location", "")
+                name = ev.get("name", "")
+                url = ev.get("website", "")
+                lines.append(f"  • <{url}|{name}> — {date_str}, {loc}")
+        if count > 16:
+            lines.append(f"  _…and more. <https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}|View full sheet>_")
         text = "\n".join(lines)
 
     payload = json.dumps({"text": text}).encode("utf-8")
@@ -136,22 +151,39 @@ def run() -> None:
         _post_slack_summary([], len(all_raw))
         return
 
-    # ── Step 4: Write to Google Sheets ───────────────────────────────────────
+    # ── Step 4: Split into conferences vs meetups ─────────────────────────────
+    conferences = [ev for ev in classified if ev.get("event_type") == "conference"]
+    meetups = [ev for ev in classified if ev.get("event_type") == "meetup"]
+
+    logger.info(f"Split: {len(conferences)} conferences, {len(meetups)} meetups")
+
+    # ── Step 5: Write to Google Sheets ───────────────────────────────────────
     if DRY_RUN:
         logger.info("DRY RUN — skipping Google Sheets write. Events that would be added:")
-        for ev in classified:
-            logger.info(f"  • {ev.get('name')} | {ev.get('start_date')} | {ev.get('location')}")
+        logger.info(f"  → '{CONFERENCES_SHEET}' ({len(conferences)} events):")
+        for ev in conferences:
+            logger.info(f"      • {ev.get('name')} | {ev.get('start_date')} | {ev.get('location')}")
+        logger.info(f"  → '{MEETUPS_SHEET}' ({len(meetups)} events):")
+        for ev in meetups:
+            logger.info(f"      • {ev.get('name')} | {ev.get('start_date')} | {ev.get('location')}")
         return
 
-    sheets = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=SHEET_NAME)
-    sheets.ensure_header()
-    written = sheets.append_events(classified)
+    # Write conferences
+    conf_sheet = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=CONFERENCES_SHEET)
+    conf_sheet.ensure_header()
+    written_conf = conf_sheet.append_events(conferences)
 
-    logger.info(f"Done. {written} new event rows added to '{SHEET_NAME}'.")
+    # Write meetups
+    meetup_sheet = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=MEETUPS_SHEET)
+    meetup_sheet.ensure_header()
+    written_meetups = meetup_sheet.append_events(meetups)
 
-    # ── Step 5: Post Slack summary ────────────────────────────────────────────
-    new_events_written = classified[:written] if written else []
-    _post_slack_summary(new_events_written, len(all_raw))
+    total_written = written_conf + written_meetups
+    logger.info(f"Done. {written_conf} conferences → '{CONFERENCES_SHEET}', {written_meetups} meetups → '{MEETUPS_SHEET}'.")
+
+    # ── Step 6: Post Slack summary ────────────────────────────────────────────
+    all_written = conferences[:written_conf] + meetups[:written_meetups]
+    _post_slack_summary(all_written, len(all_raw))
 
     logger.info("=" * 60)
     logger.info("Weekly run complete.")

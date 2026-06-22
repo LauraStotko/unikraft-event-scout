@@ -9,8 +9,9 @@ Handles:
   - Appending new event rows in the correct column order
   - Formatting dates and computed fields (Days)
 
-Column order matches your tracker:
-  Name | Category | CFP Date | CFP Status | Location | Start Date | End Date | Website | Days
+Column order matches your tracker (same for both Conferences and Meet-ups tabs):
+  Name | Category | CFP Date | CFP Status | Location | Start Date | End Date | Website | Days |
+  Notes | Assignee | Attendees | Engagement | Comment
 """
 
 import json
@@ -26,6 +27,7 @@ from googleapiclient.errors import HttpError
 logger = logging.getLogger(__name__)
 
 # The exact column headers in your Google Sheet (order matters)
+# Applies to both the Conferences and Meet-ups tabs
 SHEET_COLUMNS = [
     "Name",
     "Category",
@@ -36,7 +38,15 @@ SHEET_COLUMNS = [
     "End Date",
     "Website",
     "Days",
+    "Notes",
+    "Assignee",
+    "Attendees",
+    "Engagement",
+    "Comment",
 ]
+
+# Last column letter — used for range definitions (N = 14th column)
+LAST_COL = "N"
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -93,14 +103,14 @@ def _compute_days(start_str: str, end_str: str) -> str:
 
 
 class SheetsClient:
-    def __init__(self, spreadsheet_id: str, sheet_name: str = "Events"):
+    def __init__(self, spreadsheet_id: str, sheet_name: str):
         self.spreadsheet_id = spreadsheet_id
         self.sheet_name = sheet_name
         creds = _get_credentials()
         self.service = build("sheets", "v4", credentials=creds)
         self.sheet = self.service.spreadsheets()
 
-    def _range(self, col_start: str = "A", col_end: str = "I") -> str:
+    def _range(self, col_start: str = "A", col_end: str = LAST_COL) -> str:
         return f"'{self.sheet_name}'!{col_start}:{col_end}"
 
     def get_existing_names_and_urls(self) -> tuple[set[str], set[str]]:
@@ -109,6 +119,7 @@ class SheetsClient:
           - existing event names (lowercased)
           - existing website URLs (lowercased)
         Used for deduplication before appending.
+        Handles sheets that already have data (Conferences tab).
         """
         try:
             result = self.sheet.values().get(
@@ -116,7 +127,7 @@ class SheetsClient:
                 range=self._range(),
             ).execute()
         except HttpError as e:
-            logger.error(f"Failed to read sheet: {e}")
+            logger.error(f"Failed to read sheet '{self.sheet_name}': {e}")
             return set(), set()
 
         rows = result.get("values", [])
@@ -126,32 +137,36 @@ class SheetsClient:
         if not rows:
             return names, urls
 
-        # Find column indices from header row
+        # Find column indices from header row (flexible — works even if columns
+        # are in a different order in the existing sheet)
         header = [h.strip().lower() for h in rows[0]]
         name_idx = header.index("name") if "name" in header else 0
         url_idx = header.index("website") if "website" in header else 7
 
         for row in rows[1:]:
-            if len(row) > name_idx:
+            if len(row) > name_idx and row[name_idx].strip():
                 names.add(row[name_idx].strip().lower())
-            if len(row) > url_idx:
+            if len(row) > url_idx and row[url_idx].strip():
                 urls.add(row[url_idx].strip().lower())
 
+        logger.info(f"'{self.sheet_name}': found {len(names)} existing events for dedup")
         return names, urls
 
     def ensure_header(self) -> None:
         """
         Write the header row if the sheet is empty.
-        Safe to call every run — checks first.
+        Safe to call every run — if a header already exists it is left untouched,
+        so manually entered data in the existing Conferences tab is never overwritten.
         """
         try:
             result = self.sheet.values().get(
                 spreadsheetId=self.spreadsheet_id,
-                range=f"'{self.sheet_name}'!A1:I1",
+                range=f"'{self.sheet_name}'!A1:{LAST_COL}1",
             ).execute()
             existing = result.get("values", [])
             if existing and existing[0]:
-                return  # Header already exists
+                logger.debug(f"'{self.sheet_name}': header already exists, skipping")
+                return
         except HttpError:
             pass
 
@@ -161,11 +176,13 @@ class SheetsClient:
             valueInputOption="RAW",
             body={"values": [SHEET_COLUMNS]},
         ).execute()
-        logger.info("Header row written to sheet")
+        logger.info(f"'{self.sheet_name}': header row written")
 
     def append_events(self, events: list[dict]) -> int:
         """
-        Append a list of event dicts to the sheet.
+        Append a list of event dicts to the sheet, skipping duplicates.
+        The agent leaves Notes, Assignee, Attendees, Engagement, Comment blank
+        so your team can fill those in manually.
         Returns the number of rows actually written.
         """
         if not events:
@@ -188,15 +205,20 @@ class SheetsClient:
             days = _compute_days(start, end)
 
             row = [
-                name,
-                ev.get("category", ""),
-                ev.get("cfp_date", ""),
-                ev.get("cfp_status", ""),
-                ev.get("location", ""),
-                start,
-                end,
-                url,
-                days,
+                name,                        # Name
+                ev.get("category", ""),      # Category
+                ev.get("cfp_date", ""),      # CFP Date
+                ev.get("cfp_status", ""),    # CFP Status
+                ev.get("location", ""),      # Location
+                start,                       # Start Date
+                end,                         # End Date
+                url,                         # Website
+                days,                        # Days (computed)
+                "",                          # Notes — filled in manually
+                "",                          # Assignee — filled in manually
+                "",                          # Attendees — filled in manually
+                "",                          # Engagement — filled in manually
+                "",                          # Comment — filled in manually
             ]
             rows_to_write.append(row)
 
@@ -205,7 +227,7 @@ class SheetsClient:
             existing_urls.add(url.lower())
 
         if not rows_to_write:
-            logger.info("No new events to write — all duplicates")
+            logger.info(f"'{self.sheet_name}': no new events to write — all duplicates")
             return 0
 
         try:
@@ -216,9 +238,9 @@ class SheetsClient:
                 insertDataOption="INSERT_ROWS",
                 body={"values": rows_to_write},
             ).execute()
-            logger.info(f"Wrote {len(rows_to_write)} new events to sheet")
+            logger.info(f"'{self.sheet_name}': wrote {len(rows_to_write)} new events")
         except HttpError as e:
-            logger.error(f"Failed to append rows: {e}")
+            logger.error(f"Failed to append rows to '{self.sheet_name}': {e}")
             return 0
 
         return len(rows_to_write)

@@ -51,9 +51,14 @@ Your job: given a raw event scraped from the web, determine:
 Local meetups in Berlin, Munich, London, or Bucharest should be included even if loosely relevant (e.g. general AI or startup networking), since Unikraft has a presence in those cities.
 Global conferences should only be included if they are clearly relevant to the themes above.
 
+You must also classify every relevant event as either a "conference" or a "meetup":
+- "conference": a larger, multi-session event, typically spanning 1+ full days, with a formal programme, paid tickets, and attendees travelling from outside the city. Examples: KubeCon, WeAreDevelopers World Congress, GITEX AI Europe, AI Engineer World's Fair, DevOpsDays (city edition).
+- "meetup": a smaller, local, community-run gathering. Typically free, evening format, single location, under ~200 attendees. Examples: Cloud Native Night Munich, Agents that Pay Hackathon, Demo Night, Luma community events, AWS User Group evenings.
+
 Return ONLY a valid JSON object with these exact keys (no markdown, no explanation):
 {
   "relevant": true or false,
+  "event_type": "conference" or "meetup",
   "name": "Clean event name (fix any formatting issues)",
   "category": "One of: Cloud-Native / Kubernetes | Agentic AI | DevOps | Serverless / FaaS | Confidential Computing | AI Infra | Security | Community / Networking | Startup / General Tech",
   "location": "City, Country (or 'Virtual')",
