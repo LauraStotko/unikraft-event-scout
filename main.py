@@ -128,7 +128,88 @@ def run() -> None:
         logger.error("ANTHROPIC_API_KEY is not set. Exiting.")
         sys.exit(1)
 
-    # ── Step 1: Scrape ────────────────────────────────────────────────────────
+    # ── Step 1: Migrate past conferences from Conferences tab → Time Passed ──────
+    # Runs before scraping so the backlog is cleared first.
+    # Reads every row in the Conferences tab, checks the Start Date against today,
+    # copies past rows to Time Passed, then deletes them from Conferences.
+    # This handles both manually entered rows and any previously scraped events
+    # whose dates have now passed.
+    migrated_to_time_passed: list[dict] = []
+
+    if SPREADSHEET_ID and not DRY_RUN:
+        try:
+            conf_migration_client = SheetsClient(
+                spreadsheet_id=SPREADSHEET_ID,
+                sheet_name=CONFERENCES_SHEET,
+            )
+            all_conf_rows = conf_migration_client.get_all_rows_with_index()
+            rows_to_migrate = []
+            row_indices_to_delete = []
+
+            for row in all_conf_rows:
+                start = row.get("start date", "") or row.get("start_date", "")
+                if is_past(start):
+                    rows_to_migrate.append(row)
+                    row_indices_to_delete.append(row["_row_index"])
+                    logger.info(f"  MIGRATE → Time Passed: '{row.get('name')}' (start: {start})")
+
+            if rows_to_migrate:
+                # Convert raw sheet rows into the standard event dict format
+                # so append_events() can write them correctly
+                events_to_migrate = []
+                for row in rows_to_migrate:
+                    events_to_migrate.append({
+                        "name":       row.get("name", ""),
+                        "category":   row.get("category", ""),
+                        "cfp_date":   row.get("cfp date", "") or row.get("cfp_date", ""),
+                        "cfp_status": row.get("cfp status", "") or row.get("cfp_status", ""),
+                        "location":   row.get("location", ""),
+                        "start_date": row.get("start date", "") or row.get("start_date", ""),
+                        "end_date":   row.get("end date", "") or row.get("end_date", ""),
+                        "website":    row.get("website", ""),
+                        "event_type": "conference",
+                    })
+
+                # Write to Time Passed first
+                tp_migration_client = SheetsClient(
+                    spreadsheet_id=SPREADSHEET_ID,
+                    sheet_name=TIME_PASSED_SHEET,
+                )
+                tp_migration_client.ensure_header()
+                written = tp_migration_client.append_events(events_to_migrate)
+                logger.info(f"Migrated {written} past conferences to '{TIME_PASSED_SHEET}'")
+
+                # Only delete from Conferences after successful write
+                if written > 0:
+                    conf_migration_client.delete_rows_by_index(row_indices_to_delete)
+                    migrated_to_time_passed = events_to_migrate[:written]
+            else:
+                logger.info("No past conferences to migrate from Conferences tab")
+
+        except Exception as e:
+            logger.warning(f"Migration step failed — continuing without it: {e}")
+
+    elif DRY_RUN and SPREADSHEET_ID:
+        # In dry run mode: show what would be migrated without touching the sheet
+        try:
+            conf_migration_client = SheetsClient(
+                spreadsheet_id=SPREADSHEET_ID,
+                sheet_name=CONFERENCES_SHEET,
+            )
+            all_conf_rows = conf_migration_client.get_all_rows_with_index()
+            past_rows = [
+                r for r in all_conf_rows
+                if is_past(r.get("start date", "") or r.get("start_date", ""))
+            ]
+            if past_rows:
+                logger.info(f"DRY RUN — would migrate {len(past_rows)} past conferences to Time Passed:")
+                for r in past_rows:
+                    start = r.get("start date", "") or r.get("start_date", "")
+                    logger.info(f"  • {r.get('name')} ({start})")
+        except Exception as e:
+            logger.warning(f"Could not preview migration in dry run: {e}")
+
+    # ── Step 2: Scrape ────────────────────────────────────────────────────────
     logger.info("Scraping Luma...")
     luma_events = scrape_luma()
 
@@ -145,7 +226,7 @@ def run() -> None:
         logger.warning("No events scraped — check network or site structure changes.")
         return
 
-    # ── Step 2: Load Excluded sheet ───────────────────────────────────────────
+    # ── Step 3: Load Excluded sheet ───────────────────────────────────────────
     excluded_names: set[str] = set()
     excluded_urls:  set[str] = set()
     excluded_full:  list[dict] = []

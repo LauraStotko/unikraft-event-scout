@@ -244,6 +244,92 @@ class SheetsClient:
         logger.info(f"'{time_passed_sheet}': loaded {len(events)} past conferences to check for next editions")
         return events
 
+    def get_all_rows_with_index(self) -> list[dict]:
+        """
+        Read every data row from this sheet and return a list of dicts.
+        Each dict includes a special '_row_index' key (1-based Google Sheets row
+        number) so rows can be targeted for deletion later.
+
+        Also preserves the full raw cell values under their lowercased header names.
+        Used by the migration step to find past conferences and move them to Time Passed.
+        """
+        try:
+            result = self.sheet.values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{self.sheet_name}'!A:{LAST_COL}",
+            ).execute()
+        except HttpError as e:
+            logger.error(f"Failed to read rows from '{self.sheet_name}': {e}")
+            return []
+
+        rows = result.get("values", [])
+        if len(rows) < 2:
+            return []
+
+        header = [h.strip().lower() for h in rows[0]]
+        result_rows = []
+
+        for sheet_row_idx, row in enumerate(rows[1:], start=2):  # row 1 = header
+            padded = row + [""] * (len(header) - len(row))
+            ev = {col: padded[i].strip() for i, col in enumerate(header) if col}
+            if ev.get("name"):
+                ev["_row_index"] = sheet_row_idx
+                result_rows.append(ev)
+
+        logger.info(f"'{self.sheet_name}': read {len(result_rows)} rows with index")
+        return result_rows
+
+    def delete_rows_by_index(self, row_indices: list[int]) -> None:
+        """
+        Delete specific rows from this sheet by their 1-based row index.
+        Deletes in reverse order so earlier indices stay valid as rows are removed.
+        Uses the batchUpdate API for efficiency.
+        """
+        if not row_indices:
+            return
+
+        # Get the sheet ID (numeric) for the batchUpdate request
+        try:
+            meta = self.service.spreadsheets().get(
+                spreadsheetId=self.spreadsheet_id
+            ).execute()
+            sheet_id = None
+            for s in meta.get("sheets", []):
+                if s["properties"]["title"] == self.sheet_name:
+                    sheet_id = s["properties"]["sheetId"]
+                    break
+            if sheet_id is None:
+                logger.error(f"Could not find sheet ID for '{self.sheet_name}'")
+                return
+        except HttpError as e:
+            logger.error(f"Failed to get sheet metadata: {e}")
+            return
+
+        # Sort descending so we delete from the bottom up — preserves row indices
+        sorted_indices = sorted(set(row_indices), reverse=True)
+
+        requests = []
+        for row_idx in sorted_indices:
+            requests.append({
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "startIndex": row_idx - 1,  # API is 0-based
+                        "endIndex": row_idx,
+                    }
+                }
+            })
+
+        try:
+            self.service.spreadsheets().batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={"requests": requests},
+            ).execute()
+            logger.info(f"'{self.sheet_name}': deleted {len(sorted_indices)} rows")
+        except HttpError as e:
+            logger.error(f"Failed to delete rows from '{self.sheet_name}': {e}")
+
     def ensure_header(self) -> None:
         """
         Write the header row starting at B1 (column A stays empty).
