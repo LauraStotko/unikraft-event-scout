@@ -1,30 +1,34 @@
 """
 main.py — Unikraft Event Scout Agent
 
-Orchestrates the full pipeline:
-  1. Scrape events from Luma, Techmeme, CNCF / Linux Foundation
-  2. Classify each event with Claude (relevance + structured fields + event_type)
-  3. Split into conferences and meetups
-  4. Deduplicate against existing rows in each tab
-  5. Append new conferences → "Conferences" tab, meetups → "Meet-ups" tab
-  6. (Optional) Post a Slack summary
+Full pipeline each weekly run:
+  1.  Scrape events from Luma, Techmeme, CNCF / Linux Foundation
+  2.  Load Excluded sheet (exact blocks + pattern learning)
+  3.  Classify scraped events with Claude
+  4.  Date-filter:
+        - Future events only → route to Conferences or Meet-ups tab
+        - Past conferences   → route to Time Passed tab
+        - Past meetups       → silently drop (no value in tracking stale local events)
+  5.  Check every event already in the Time Passed tab:
+        - Ask Claude if a next edition has been announced
+        - If yes and not already in Conferences → add to Conferences tab
+  6.  Write all new rows, deduplicated across all tabs
+  7.  (Optional) Post Slack summary
 
-Usage:
-  python main.py
-
-Environment variables required (see .env.example):
+Environment variables required:
   ANTHROPIC_API_KEY
   GOOGLE_SPREADSHEET_ID
-  GOOGLE_SERVICE_ACCOUNT_JSON   (JSON string, for GitHub Actions)
+  GOOGLE_SERVICE_ACCOUNT_JSON   (JSON string — for GitHub Actions)
   -- or --
-  GOOGLE_SERVICE_ACCOUNT_FILE   (path to .json key file, for local runs)
+  GOOGLE_SERVICE_ACCOUNT_FILE   (path to local .json key file)
 
 Optional:
-  SLACK_WEBHOOK_URL             (if you want weekly Slack summaries)
-  CONFERENCES_SHEET             (tab name for conferences, defaults to "Conferences")
-  MEETUPS_SHEET                 (tab name for meetups, defaults to "Meet-ups")
-  EXCLUDED_SHEET                (tab name for excluded events, defaults to "Excluded")
-  DRY_RUN                       (set to "true" to skip writing to sheet)
+  CONFERENCES_SHEET   tab name, default "Conferences"
+  MEETUPS_SHEET       tab name, default "Meet-ups"
+  EXCLUDED_SHEET      tab name, default "Excluded"
+  TIME_PASSED_SHEET   tab name, default "Time Passed"
+  SLACK_WEBHOOK_URL
+  DRY_RUN             set "true" to skip all sheet writes
 """
 
 import logging
@@ -33,18 +37,17 @@ import sys
 import json
 from datetime import datetime, timezone
 
-# Load .env file if present (local development)
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass  # python-dotenv not installed — fine in CI
+    pass
 
 from scrapers import scrape_luma, scrape_techmeme, scrape_cncf
-from agent import classify_batch
+from agent import classify_batch, check_all_next_editions, is_future, is_past
 from sheets import SheetsClient
 
-# ── Logging ──────────────────────────────────────────────────────────────────
+# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
@@ -52,55 +55,55 @@ logging.basicConfig(
 )
 logger = logging.getLogger("unikraft-event-agent")
 
-
 # ── Config ────────────────────────────────────────────────────────────────────
-SPREADSHEET_ID = os.environ.get("GOOGLE_SPREADSHEET_ID", "")
+SPREADSHEET_ID    = os.environ.get("GOOGLE_SPREADSHEET_ID", "")
 CONFERENCES_SHEET = os.environ.get("CONFERENCES_SHEET", "Conferences")
-MEETUPS_SHEET = os.environ.get("MEETUPS_SHEET", "Meet-ups")
-EXCLUDED_SHEET = os.environ.get("EXCLUDED_SHEET", "Excluded")
+MEETUPS_SHEET     = os.environ.get("MEETUPS_SHEET", "Meet-ups")
+EXCLUDED_SHEET    = os.environ.get("EXCLUDED_SHEET", "Excluded")
+TIME_PASSED_SHEET = os.environ.get("TIME_PASSED_SHEET", "Time Passed")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
-DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
+DRY_RUN           = os.environ.get("DRY_RUN", "false").lower() == "true"
 
 
 # ── Slack helper ──────────────────────────────────────────────────────────────
-def _post_slack_summary(new_events: list[dict], total_scraped: int) -> None:
-    """Post a brief Slack message summarising this week's new events."""
+def _post_slack_summary(
+    new_conferences: list[dict],
+    new_meetups: list[dict],
+    new_time_passed: list[dict],
+    next_editions: list[dict],
+) -> None:
     if not SLACK_WEBHOOK_URL:
         return
 
     import urllib.request
 
-    count = len(new_events)
-    if count == 0:
-        text = "🔍 *Unikraft Event Scout* — weekly run complete. No new events found this week."
+    total = len(new_conferences) + len(new_meetups) + len(next_editions)
+    if total == 0 and not new_time_passed:
+        text = "🔍 *Unikraft Event Scout* — weekly run complete. No new events found."
     else:
-        conferences = [e for e in new_events if e.get("event_type") == "conference"]
-        meetups = [e for e in new_events if e.get("event_type") == "meetup"]
-        lines = [f"🗓️ *Unikraft Event Scout* — {count} new event{'s' if count != 1 else ''} added to the tracker:"]
-        if conferences:
-            lines.append(f"\n*Conferences ({len(conferences)}):*")
-            for ev in conferences[:8]:
-                date_str = ev.get("start_date", "TBC")
-                loc = ev.get("location", "")
-                name = ev.get("name", "")
-                url = ev.get("website", "")
-                lines.append(f"  • <{url}|{name}> — {date_str}, {loc}")
-        if meetups:
-            lines.append(f"\n*Meetups ({len(meetups)}):*")
-            for ev in meetups[:8]:
-                date_str = ev.get("start_date", "TBC")
-                loc = ev.get("location", "")
-                name = ev.get("name", "")
-                url = ev.get("website", "")
-                lines.append(f"  • <{url}|{name}> — {date_str}, {loc}")
-        if count > 16:
-            lines.append(f"  _…and more. <https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}|View full sheet>_")
+        lines = [f"🗓️ *Unikraft Event Scout* — weekly update:"]
+        if new_conferences:
+            lines.append(f"\n*New conferences ({len(new_conferences)}):*")
+            for ev in new_conferences[:6]:
+                lines.append(f"  • <{ev.get('website','')}|{ev.get('name','')}> — {ev.get('start_date','TBC')}, {ev.get('location','')}")
+        if new_meetups:
+            lines.append(f"\n*New meetups ({len(new_meetups)}):*")
+            for ev in new_meetups[:6]:
+                lines.append(f"  • <{ev.get('website','')}|{ev.get('name','')}> — {ev.get('location','')}")
+        if new_time_passed:
+            lines.append(f"\n*Moved to Time Passed ({len(new_time_passed)}):*")
+            for ev in new_time_passed[:4]:
+                lines.append(f"  • {ev.get('name','')} ({ev.get('start_date','?')})")
+        if next_editions:
+            lines.append(f"\n*Next editions found ({len(next_editions)}):*")
+            for ev in next_editions[:4]:
+                lines.append(f"  • <{ev.get('website','')}|{ev.get('name','')}> — {ev.get('start_date','TBC')}")
+        lines.append(f"\n<https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}|View tracker>")
         text = "\n".join(lines)
 
     payload = json.dumps({"text": text}).encode("utf-8")
     req = urllib.request.Request(
-        SLACK_WEBHOOK_URL,
-        data=payload,
+        SLACK_WEBHOOK_URL, data=payload,
         headers={"Content-Type": "application/json"},
     )
     try:
@@ -114,20 +117,18 @@ def _post_slack_summary(new_events: list[dict], total_scraped: int) -> None:
 def run() -> None:
     logger.info("=" * 60)
     logger.info("Unikraft Event Scout — starting weekly run")
-    logger.info(f"Timestamp: {datetime.now(timezone.utc).isoformat()}")
-    logger.info(f"Dry run: {DRY_RUN}")
+    logger.info(f"Timestamp : {datetime.now(timezone.utc).isoformat()}")
+    logger.info(f"Dry run   : {DRY_RUN}")
     logger.info("=" * 60)
 
-    # ── Step 1: Validate config ───────────────────────────────────────────────
     if not SPREADSHEET_ID and not DRY_RUN:
         logger.error("GOOGLE_SPREADSHEET_ID is not set. Exiting.")
         sys.exit(1)
-
     if not os.environ.get("ANTHROPIC_API_KEY"):
         logger.error("ANTHROPIC_API_KEY is not set. Exiting.")
         sys.exit(1)
 
-    # ── Step 2: Scrape all sources ────────────────────────────────────────────
+    # ── Step 1: Scrape ────────────────────────────────────────────────────────
     logger.info("Scraping Luma...")
     luma_events = scrape_luma()
 
@@ -141,105 +142,152 @@ def run() -> None:
     logger.info(f"Total raw events collected: {len(all_raw)}")
 
     if not all_raw:
-        logger.warning("No events scraped from any source. Check network or site structure changes.")
+        logger.warning("No events scraped — check network or site structure changes.")
         return
 
-    # ── Step 3: Load the Excluded sheet ──────────────────────────────────────
-    # Read two things from the Excluded tab:
-    #   a) exact name + URL sets  → fast hard blocks before any Claude call
-    #   b) full row data          → passed to Claude to derive patterns, so the
-    #      agent learns to reject similar events it has never seen before
+    # ── Step 2: Load Excluded sheet ───────────────────────────────────────────
     excluded_names: set[str] = set()
-    excluded_urls: set[str] = set()
-    excluded_events_full: list[dict] = []
+    excluded_urls:  set[str] = set()
+    excluded_full:  list[dict] = []
 
     if SPREADSHEET_ID:
         try:
-            excl_client = SheetsClient(
-                spreadsheet_id=SPREADSHEET_ID,
-                sheet_name=EXCLUDED_SHEET,
-            )
-            excluded_names, excluded_urls = excl_client.get_excluded_names_and_urls(
-                excluded_sheet=EXCLUDED_SHEET
-            )
-            excluded_events_full = excl_client.get_excluded_events_full(
-                excluded_sheet=EXCLUDED_SHEET
-            )
-            logger.info(
-                f"Excluded sheet: {len(excluded_names)} events loaded "
-                f"({len(excluded_events_full)} with full data for pattern learning)"
-            )
+            excl = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=EXCLUDED_SHEET)
+            excluded_names, excluded_urls = excl.get_excluded_names_and_urls(EXCLUDED_SHEET)
+            excluded_full = excl.get_excluded_events_full(EXCLUDED_SHEET)
+            logger.info(f"Excluded: {len(excluded_names)} events ({len(excluded_full)} with full data)")
         except Exception as e:
             logger.warning(f"Could not read Excluded sheet — continuing without it: {e}")
 
-    # ── Step 4: Classify with Claude ─────────────────────────────────────────
+    # ── Step 3: Classify ──────────────────────────────────────────────────────
     classified = classify_batch(
         all_raw,
         max_events=80,
         excluded_names=excluded_names,
         excluded_urls=excluded_urls,
-        excluded_events_full=excluded_events_full,
+        excluded_events_full=excluded_full,
     )
-    logger.info(f"Relevant events after classification: {len(classified)}")
+    logger.info(f"Classified: {len(classified)} relevant events")
 
-    # ── DIAGNOSTIC: show every classified event so we can see what survives ──
     for ev in classified:
         logger.info(
-            f"  CLASSIFIED [{ev.get('event_type','?')}] "
-            f"{ev.get('name')} | {ev.get('start_date','no date')} | {ev.get('location','')}"
+            f"  [{ev.get('event_type','?')}] {ev.get('name')} | "
+            f"{ev.get('start_date','no date')} | {ev.get('location','')}"
         )
 
     if not classified:
-        logger.info("No relevant events found this week.")
-        _post_slack_summary([], len(all_raw))
-        return
+        logger.info("No relevant events this week.")
 
-    # ── Step 5: Split into conferences vs meetups ─────────────────────────────
-    conferences = [ev for ev in classified if ev.get("event_type") == "conference"]
-    meetups = [ev for ev in classified if ev.get("event_type") == "meetup"]
+    # ── Step 4: Date-filter and route ─────────────────────────────────────────
+    # Conferences
+    future_conferences = []
+    past_conferences   = []
+    for ev in classified:
+        if ev.get("event_type") != "conference":
+            continue
+        start = ev.get("start_date", "")
+        if is_past(start):
+            past_conferences.append(ev)
+            logger.info(f"  PAST conference → Time Passed: {ev.get('name')} ({start})")
+        else:
+            future_conferences.append(ev)
 
-    logger.info(f"Split: {len(conferences)} conferences, {len(meetups)} meetups")
+    # Meetups — only keep future ones; past meetups are silently dropped
+    future_meetups = []
+    for ev in classified:
+        if ev.get("event_type") != "meetup":
+            continue
+        start = ev.get("start_date", "")
+        if is_past(start):
+            logger.info(f"  PAST meetup → dropping: {ev.get('name')} ({start})")
+        else:
+            future_meetups.append(ev)
 
-    # ── Step 6: Write to Google Sheets ───────────────────────────────────────
+    logger.info(
+        f"Routing: {len(future_conferences)} future conferences, "
+        f"{len(future_meetups)} future meetups, "
+        f"{len(past_conferences)} past conferences → Time Passed"
+    )
+
+    # ── Step 5: Check Time Passed tab for next editions ───────────────────────
+    time_passed_events: list[dict] = []
+    next_edition_conferences: list[dict] = []
+
+    if SPREADSHEET_ID:
+        try:
+            tp_client = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=TIME_PASSED_SHEET)
+            time_passed_events = tp_client.get_time_passed_events(TIME_PASSED_SHEET)
+        except Exception as e:
+            logger.warning(f"Could not read Time Passed sheet: {e}")
+
+    if time_passed_events:
+        next_edition_conferences = check_all_next_editions(time_passed_events)
+        # Filter out any next editions that are also in the past (shouldn't happen but be safe)
+        next_edition_conferences = [
+            ev for ev in next_edition_conferences
+            if not is_past(ev.get("start_date", ""))
+        ]
+        logger.info(f"Next editions to add to Conferences: {len(next_edition_conferences)}")
+        for ev in next_edition_conferences:
+            logger.info(f"  NEXT EDITION: {ev.get('name')} | {ev.get('start_date')} | {ev.get('location')}")
+
+    # ── Step 6: Dry run output ────────────────────────────────────────────────
     if DRY_RUN:
-        logger.info("DRY RUN — skipping Google Sheets write. Events that would be added:")
-        logger.info(f"  → '{CONFERENCES_SHEET}' ({len(conferences)} events):")
-        for ev in conferences:
+        logger.info("DRY RUN — no writes. Summary of what would happen:")
+        logger.info(f"  → '{CONFERENCES_SHEET}' ({len(future_conferences)} future + {len(next_edition_conferences)} next editions):")
+        for ev in future_conferences + next_edition_conferences:
             logger.info(f"      • {ev.get('name')} | {ev.get('start_date')} | {ev.get('location')}")
             if ev.get("relevance_note"):
                 logger.info(f"        ↳ {ev.get('relevance_note')}")
-        logger.info(f"  → '{MEETUPS_SHEET}' ({len(meetups)} events):")
-        for ev in meetups:
+        logger.info(f"  → '{MEETUPS_SHEET}' ({len(future_meetups)} events):")
+        for ev in future_meetups:
             logger.info(f"      • {ev.get('name')} | {ev.get('start_date')} | {ev.get('location')}")
-            if ev.get("relevance_note"):
-                logger.info(f"        ↳ {ev.get('relevance_note')}")
+        logger.info(f"  → '{TIME_PASSED_SHEET}' ({len(past_conferences)} events):")
+        for ev in past_conferences:
+            logger.info(f"      • {ev.get('name')} | {ev.get('start_date')}")
         return
 
-    # Write conferences
+    # ── Step 7: Write to sheets ───────────────────────────────────────────────
+
+    # Conferences tab: future scraped + next editions from Time Passed
     conf_sheet = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=CONFERENCES_SHEET)
     conf_sheet.ensure_header()
-    logger.info(f"Writing {len(conferences)} conferences to '{CONFERENCES_SHEET}'...")
-    written_conf = conf_sheet.append_events(conferences)
+    all_conferences_to_write = future_conferences + next_edition_conferences
+    logger.info(f"Writing {len(all_conferences_to_write)} entries to '{CONFERENCES_SHEET}'...")
+    written_conf = conf_sheet.append_events(all_conferences_to_write)
 
-    # Write meetups
+    # Meet-ups tab: future meetups only
     meetup_sheet = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=MEETUPS_SHEET)
     meetup_sheet.ensure_header()
-    logger.info(f"Writing {len(meetups)} meetups to '{MEETUPS_SHEET}'...")
-    written_meetups = meetup_sheet.append_events(meetups)
+    logger.info(f"Writing {len(future_meetups)} entries to '{MEETUPS_SHEET}'...")
+    written_meetups = meetup_sheet.append_events(future_meetups)
 
-    total_written = written_conf + written_meetups
-    logger.info(f"Done. {written_conf} conferences → '{CONFERENCES_SHEET}', {written_meetups} meetups → '{MEETUPS_SHEET}'.")
-    if total_written == 0:
+    # Time Passed tab: past conferences
+    tp_sheet = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=TIME_PASSED_SHEET)
+    tp_sheet.ensure_header()
+    logger.info(f"Writing {len(past_conferences)} entries to '{TIME_PASSED_SHEET}'...")
+    written_tp = tp_sheet.append_events(past_conferences)
+
+    logger.info(
+        f"Done. "
+        f"{written_conf} → '{CONFERENCES_SHEET}' | "
+        f"{written_meetups} → '{MEETUPS_SHEET}' | "
+        f"{written_tp} → '{TIME_PASSED_SHEET}'"
+    )
+
+    if written_conf + written_meetups + written_tp == 0:
         logger.warning(
-            "ZERO rows written. Most likely cause: all classified events already "
-            "exist in the sheet (dedup blocked them). Check the 'Skipping duplicate' "
-            "lines above to confirm. If events from the Conferences/Meet-ups sheet "
-            "match what the agent found, that is expected — the sheet is up to date."
+            "ZERO rows written. All classified events are likely already in the sheet. "
+            "Check DEDUP SKIP lines above to confirm."
         )
 
-    # ── Step 7: Post Slack summary ────────────────────────────────────────────
-    all_written = conferences[:written_conf] + meetups[:written_meetups]
-    _post_slack_summary(all_written, len(all_raw))
+    # ── Step 8: Slack summary ─────────────────────────────────────────────────
+    _post_slack_summary(
+        new_conferences=future_conferences[:written_conf],
+        new_meetups=future_meetups[:written_meetups],
+        new_time_passed=past_conferences[:written_tp],
+        next_editions=next_edition_conferences,
+    )
 
     logger.info("=" * 60)
     logger.info("Weekly run complete.")

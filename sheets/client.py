@@ -214,6 +214,36 @@ class SheetsClient:
         logger.info(f"'{excluded_sheet}': loaded {len(events)} full excluded event records")
         return events
 
+    def get_time_passed_events(self, time_passed_sheet: str = "Time Passed") -> list[dict]:
+        """
+        Read all rows from the Time Passed tab and return them as a list of dicts.
+        Each dict has at minimum 'name' and 'website' keys.
+        Used each run to check whether next editions have been announced.
+        """
+        try:
+            result = self.sheet.values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{time_passed_sheet}'!A:{LAST_COL}",
+            ).execute()
+        except HttpError as e:
+            logger.warning(f"Could not read '{time_passed_sheet}' tab: {e}")
+            return []
+
+        rows = result.get("values", [])
+        if len(rows) < 2:
+            return []
+
+        header = [h.strip().lower() for h in rows[0]]
+        events = []
+        for row in rows[1:]:
+            padded = row + [""] * (len(header) - len(row))
+            ev = {col: padded[i].strip() for i, col in enumerate(header) if col}
+            if ev.get("name"):
+                events.append(ev)
+
+        logger.info(f"'{time_passed_sheet}': loaded {len(events)} past conferences to check for next editions")
+        return events
+
     def ensure_header(self) -> None:
         """
         Write the header row starting at B1 (column A stays empty).
