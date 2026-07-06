@@ -374,13 +374,16 @@ def classify_batch(
 
         # Fast path: exact name or URL match in Excluded sheet
         if name in excluded_names or url in excluded_urls:
-            logger.debug(f"Exact block: {ev.get('name')}")
+            logger.info(f"  EXCLUDED (exact): {ev.get('name')}")
             skipped_exact += 1
             continue
 
         result = classify_event(ev, system_prompt)
         if result:
+            logger.info(f"  RELEVANT: {ev.get('name')}")
             classified.append(result)
+        else:
+            logger.info(f"  REJECTED by Claude: {ev.get('name')}")
 
     logger.info(
         f"Classification complete: {len(classified)} relevant | "

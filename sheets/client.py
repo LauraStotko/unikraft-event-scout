@@ -261,7 +261,7 @@ class SheetsClient:
 
             # Deduplicate by name or URL
             if name.lower() in existing_names or url.lower() in existing_urls:
-                logger.debug(f"Skipping duplicate: {name}")
+                logger.info(f"  DEDUP SKIP: '{name}' (already in sheet)")
                 continue
 
             start = ev.get("start_date", "")

@@ -173,11 +173,6 @@ def run() -> None:
             logger.warning(f"Could not read Excluded sheet — continuing without it: {e}")
 
     # ── Step 4: Classify with Claude ─────────────────────────────────────────
-    # Claude will:
-    #   1. Derive exclusion patterns from the full excluded event list (1 API call)
-    #   2. Build a pattern-aware system prompt
-    #   3. Use that prompt to classify every new event — catching not just exact
-    #      matches but any event that resembles what your team has rejected before
     classified = classify_batch(
         all_raw,
         max_events=80,
@@ -186,6 +181,13 @@ def run() -> None:
         excluded_events_full=excluded_events_full,
     )
     logger.info(f"Relevant events after classification: {len(classified)}")
+
+    # ── DIAGNOSTIC: show every classified event so we can see what survives ──
+    for ev in classified:
+        logger.info(
+            f"  CLASSIFIED [{ev.get('event_type','?')}] "
+            f"{ev.get('name')} | {ev.get('start_date','no date')} | {ev.get('location','')}"
+        )
 
     if not classified:
         logger.info("No relevant events found this week.")
@@ -216,15 +218,24 @@ def run() -> None:
     # Write conferences
     conf_sheet = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=CONFERENCES_SHEET)
     conf_sheet.ensure_header()
+    logger.info(f"Writing {len(conferences)} conferences to '{CONFERENCES_SHEET}'...")
     written_conf = conf_sheet.append_events(conferences)
 
     # Write meetups
     meetup_sheet = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=MEETUPS_SHEET)
     meetup_sheet.ensure_header()
+    logger.info(f"Writing {len(meetups)} meetups to '{MEETUPS_SHEET}'...")
     written_meetups = meetup_sheet.append_events(meetups)
 
     total_written = written_conf + written_meetups
     logger.info(f"Done. {written_conf} conferences → '{CONFERENCES_SHEET}', {written_meetups} meetups → '{MEETUPS_SHEET}'.")
+    if total_written == 0:
+        logger.warning(
+            "ZERO rows written. Most likely cause: all classified events already "
+            "exist in the sheet (dedup blocked them). Check the 'Skipping duplicate' "
+            "lines above to confirm. If events from the Conferences/Meet-ups sheet "
+            "match what the agent found, that is expected — the sheet is up to date."
+        )
 
     # ── Step 7: Post Slack summary ────────────────────────────────────────────
     all_written = conferences[:written_conf] + meetups[:written_meetups]
