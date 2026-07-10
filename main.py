@@ -49,6 +49,7 @@ from agent import (
     check_all_next_editions,
     enrich_with_cfp,
     find_cfp,
+    select_meetups,
     is_future,
     is_past,
     is_first_run_of_month,
@@ -70,6 +71,7 @@ CONFERENCES_SHEET = os.environ.get("CONFERENCES_SHEET", "Conferences")
 MEETUPS_SHEET     = os.environ.get("MEETUPS_SHEET", "Meet-ups")
 EXCLUDED_SHEET    = os.environ.get("EXCLUDED_SHEET", "Excluded")
 TIME_PASSED_SHEET = os.environ.get("TIME_PASSED_SHEET", "Time Passed")
+SF_DEMOS_SHEET    = os.environ.get("SF_DEMOS_SHEET", "SF Product Demos")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 DRY_RUN           = os.environ.get("DRY_RUN", "false").lower() == "true"
 
@@ -313,9 +315,15 @@ def run() -> None:
 
     logger.info(
         f"Routing: {len(future_conferences)} future conferences, "
-        f"{len(future_meetups)} future meetups, "
+        f"{len(future_meetups)} future meetups (pre-selection), "
         f"{len(past_conferences)} past conferences → Time Passed"
     )
+
+    # ── Step 4b: Select meetups (focus cities, weekly cap, SF demo split) ──────
+    # Narrows the full meetup list to San Francisco / Berlin / Munich only,
+    # keeps the top 1-2 per city per event-week by fit score, and splits out
+    # SF demo-suitable events into their own bucket.
+    general_meetups, sf_demo_meetups = select_meetups(future_meetups)
 
     # ── Step 5: Check Time Passed tab for next editions ───────────────────────
     time_passed_events: list[dict] = []
@@ -371,9 +379,12 @@ def run() -> None:
             logger.info(f"      • {ev.get('name')} | {ev.get('start_date')} | {ev.get('location')}{cfp}")
             if ev.get("relevance_note"):
                 logger.info(f"        ↳ {ev.get('relevance_note')}")
-        logger.info(f"  → '{MEETUPS_SHEET}' ({len(future_meetups)} events):")
-        for ev in future_meetups:
-            logger.info(f"      • {ev.get('name')} | {ev.get('start_date')} | {ev.get('location')}")
+        logger.info(f"  → '{MEETUPS_SHEET}' ({len(general_meetups)} events):")
+        for ev in general_meetups:
+            logger.info(f"      • {ev.get('name')} | {ev.get('start_date')} | {ev.get('location')} (score {ev.get('fit_score')})")
+        logger.info(f"  → '{SF_DEMOS_SHEET}' ({len(sf_demo_meetups)} events):")
+        for ev in sf_demo_meetups:
+            logger.info(f"      • {ev.get('name')} | {ev.get('start_date')} | {ev.get('location')} (score {ev.get('fit_score')})")
         logger.info(f"  → '{TIME_PASSED_SHEET}' ({len(past_conferences)} events):")
         for ev in past_conferences:
             logger.info(f"      • {ev.get('name')} | {ev.get('start_date')}")
@@ -388,11 +399,17 @@ def run() -> None:
     logger.info(f"Writing {len(all_conferences_to_write)} entries to '{CONFERENCES_SHEET}'...")
     written_conf = conf_sheet.append_events(all_conferences_to_write)
 
-    # Meet-ups tab: future meetups only
+    # Meet-ups tab: selected general meetups (SF/Berlin/Munich, capped per week)
     meetup_sheet = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=MEETUPS_SHEET)
     meetup_sheet.ensure_header()
-    logger.info(f"Writing {len(future_meetups)} entries to '{MEETUPS_SHEET}'...")
-    written_meetups = meetup_sheet.append_events(future_meetups)
+    logger.info(f"Writing {len(general_meetups)} entries to '{MEETUPS_SHEET}'...")
+    written_meetups = meetup_sheet.append_events(general_meetups)
+
+    # SF Product Demos tab: San Francisco meetups suitable for a product demo
+    sf_demo_sheet = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=SF_DEMOS_SHEET)
+    sf_demo_sheet.ensure_header()
+    logger.info(f"Writing {len(sf_demo_meetups)} entries to '{SF_DEMOS_SHEET}'...")
+    written_sf_demos = sf_demo_sheet.append_events(sf_demo_meetups)
 
     # Time Passed tab: past conferences
     tp_sheet = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=TIME_PASSED_SHEET)
@@ -404,10 +421,11 @@ def run() -> None:
         f"Done. "
         f"{written_conf} → '{CONFERENCES_SHEET}' | "
         f"{written_meetups} → '{MEETUPS_SHEET}' | "
+        f"{written_sf_demos} → '{SF_DEMOS_SHEET}' | "
         f"{written_tp} → '{TIME_PASSED_SHEET}'"
     )
 
-    if written_conf + written_meetups + written_tp == 0:
+    if written_conf + written_meetups + written_sf_demos + written_tp == 0:
         logger.warning(
             "ZERO rows written. All classified events are likely already in the sheet. "
             "Check DEDUP SKIP lines above to confirm."
@@ -454,7 +472,7 @@ def run() -> None:
     # ── Step 10: Slack summary ────────────────────────────────────────────────
     _post_slack_summary(
         new_conferences=future_conferences[:written_conf],
-        new_meetups=future_meetups[:written_meetups],
+        new_meetups=(general_meetups[:written_meetups] + sf_demo_meetups[:written_sf_demos]),
         new_time_passed=past_conferences[:written_tp],
         next_editions=next_edition_conferences,
     )

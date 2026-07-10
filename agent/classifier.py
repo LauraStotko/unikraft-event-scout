@@ -207,14 +207,25 @@ Your job: given a raw event scraped from the web, determine:
 2. If yes, extract the structured fields below.
 
 RELEVANCE RULES:
-- Local meetups in Berlin, Munich, London, or Bucharest: include if the audience contains engineers, CTOs, or technical founders — even loosely relevant topics (e.g. general AI, startup networking) are fine since Unikraft has a presence there and face-time with the local tech community is valuable.
+- MEETUPS: only include local meetups in San Francisco, Berlin, or Munich. Meetups in any other city are NOT relevant — mark them relevant=false. Within these three cities, only include a meetup if ACTUAL POTENTIAL CLIENTS would be present: engineers, CTOs, platform/infra leads, or technical founders who build or buy cloud infrastructure. Be selective — a purely social mixer, a beginner workshop, or a non-technical networking event is NOT worth attending even if it is in one of these cities.
 - Global conferences: only include if clearly relevant to cloud infrastructure, AI agents, serverless, platform engineering, or DevOps — AND if the audience includes people who make or influence infrastructure decisions.
-- Always ask: "Would a CTO or platform engineer at an AI startup attend this?" If yes, include it.
+- Always ask: "Would a CTO or platform engineer at an AI startup attend this, and could we meet potential customers there?" If not clearly yes, mark relevant=false.
 
 EVENT TYPE:
 Classify every relevant event as either "conference" or "meetup":
 - "conference": multi-session, 1+ full days, formal programme, paid tickets, attendees travel. Examples: KubeCon, WeAreDevelopers World Congress, AI Engineer World's Fair, DevOpsDays.
-- "meetup": local, community-run, free, evening format, single venue, under ~200 people. Examples: Cloud Native Night Munich, AWS User Group, Luma community events, demo nights."""
+- "meetup": local, community-run, free, evening format, single venue, under ~200 people. Examples: Cloud Native Night Munich, AWS User Group, Luma community events, demo nights.
+
+MEETUP SCORING (only for meetups):
+Give each meetup a fit_score from 0-100 based on how valuable it is to attend for meeting potential Unikraft Cloud customers. Weight these factors:
+- Technical audience (engineers, CTOs, infra/platform leads, technical founders present) — most important
+- Topic match to Unikraft use cases (AI agents, serverless, cloud-native, DevOps, platform engineering, FaaS)
+- Event format quality (prefer demo nights, technical talks, hackathons, show-and-tell over social mixers)
+- Attendance / reach (prefer events with a meaningful number of registered attendees)
+A generic or weakly-relevant meetup should score below 50. Only strong, clearly-worthwhile events should score 70+.
+
+DEMO SUITABILITY (only for San Francisco meetups):
+Set demo_suitable=true if the event format would realistically let Unikraft show a live product demo — e.g. demo nights, show-and-tell, startup showcases, hackathons, lightning-talk / demo formats. Otherwise demo_suitable=false. For non-SF meetups always set demo_suitable=false."""
 
     # Inject learned exclusion patterns if available
     if exclusion_patterns and exclusion_patterns.get("exclusion_patterns"):
@@ -253,6 +264,8 @@ Return ONLY a valid JSON object with these exact keys (no markdown, no explanati
   "cfp_date": "MMM DD, YYYY deadline if known, else empty string",
   "cfp_status": "One of: Open | Closed | Check site | —",
   "website": "The canonical event URL (not a redirect)",
+  "fit_score": integer 0-100 (meetups only; use 0 for conferences),
+  "demo_suitable": true or false (SF meetups only; false otherwise),
   "relevance_note": "One sentence on why this is (or isn't) valuable for Unikraft Cloud's customer visibility"
 }}
 

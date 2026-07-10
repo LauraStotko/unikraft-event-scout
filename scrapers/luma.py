@@ -1,8 +1,8 @@
 """
 scrapers/luma.py
 
-Fetches upcoming tech events from Luma city pages.
-Targets: Berlin, Munich, London, and a broader EU/global discover feed.
+Fetches upcoming tech meetups from Luma city pages.
+Meetup focus cities: San Francisco, Berlin, Munich.
 Returns a list of raw event dicts for the agent to classify.
 """
 
@@ -25,16 +25,12 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# City pages + a few curated tag/category pages
+# Meetup focus cities: San Francisco, Berlin, Munich only.
+# Each entry carries a canonical city label used downstream for the per-city cap.
 LUMA_SOURCES = [
+    ("https://lu.ma/sf", "San Francisco, USA"),
     ("https://lu.ma/berlin", "Berlin, Germany"),
     ("https://lu.ma/munich", "Munich, Germany"),
-    ("https://lu.ma/london", "London, UK"),
-    # Broader discovery pages relevant to Unikraft
-    ("https://lu.ma/discover?tag=devops", "Various"),
-    ("https://lu.ma/discover?tag=ai", "Various"),
-    ("https://lu.ma/discover?tag=cloud", "Various"),
-    ("https://lu.ma/discover?tag=kubernetes", "Various"),
 ]
 
 # Keywords that make an event relevant to Unikraft
@@ -113,6 +109,7 @@ def _parse_luma_page(url: str, default_location: str) -> list[dict]:
             "name": name,
             "source": "Luma",
             "raw_location": location,
+            "focus_city": location,  # canonical city for the per-city cap
             "website": full_url,
             "card_text": card_text,
             "scraped_at": datetime.now(timezone.utc).isoformat(),
