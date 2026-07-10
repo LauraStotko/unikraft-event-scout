@@ -82,7 +82,7 @@ def check_next_edition(past_event: dict) -> Optional[dict]:
     )
 
     logger.info(f"  Searching web for next edition of: {name}")
-    result = search_and_extract(prompt, max_searches=4, max_tokens=1024)
+    result = search_and_extract(prompt, max_searches=2, max_tokens=1024)
 
     if not result:
         logger.info(f"    → no parseable result for {name}")

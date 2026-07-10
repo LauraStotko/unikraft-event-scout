@@ -16,12 +16,20 @@ on:
         options:
           - "false"
           - "true"
+      force_web_search:
+        description: "Force web search (next editions + CFP) regardless of throttle schedule"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 jobs:
   scout:
     name: Scrape, classify, and update sheet
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -43,8 +51,8 @@ jobs:
           # Store your full service account JSON as a single GitHub secret
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SHEET_NAME: "Events"
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          FORCE_WEB_SEARCH: ${{ github.event.inputs.force_web_search || 'false' }}
         run: python main.py
 
       - name: Upload run log on failure

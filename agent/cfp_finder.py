@@ -88,7 +88,7 @@ def find_cfp(event: dict) -> Optional[dict]:
     )
 
     logger.info(f"  Searching web for CFP: {name}")
-    result = search_and_extract(prompt, max_searches=4, max_tokens=800)
+    result = search_and_extract(prompt, max_searches=2, max_tokens=800)
 
     if not result:
         logger.info(f"    → no parseable CFP result for {name}")

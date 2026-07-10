@@ -51,6 +51,8 @@ from agent import (
     find_cfp,
     is_future,
     is_past,
+    is_first_run_of_month,
+    is_odd_week,
 )
 from sheets import SheetsClient
 
@@ -70,8 +72,20 @@ EXCLUDED_SHEET    = os.environ.get("EXCLUDED_SHEET", "Excluded")
 TIME_PASSED_SHEET = os.environ.get("TIME_PASSED_SHEET", "Time Passed")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 DRY_RUN           = os.environ.get("DRY_RUN", "false").lower() == "true"
-# Refresh CFP status on conferences already in the sheet each run (uses web search)
+
+# ── Web-search throttling (cost control) ──────────────────────────────────────
+# The scrape + classify steps run every week (cheap). The expensive web-search
+# steps are throttled off the calendar so they don't run on every weekly run:
+#   - Next-edition search : first weekly run of each month
+#   - CFP web search       : every other week (odd ISO weeks)
+# Set FORCE_WEB_SEARCH=true (e.g. via manual workflow_dispatch) to run them now
+# regardless of the calendar.
+FORCE_WEB_SEARCH  = os.environ.get("FORCE_WEB_SEARCH", "false").lower() == "true"
 REFRESH_CFP       = os.environ.get("REFRESH_CFP", "true").lower() == "true"
+
+# Resolve throttle decisions once at startup
+RUN_NEXT_EDITION  = FORCE_WEB_SEARCH or is_first_run_of_month()
+RUN_CFP_SEARCH    = FORCE_WEB_SEARCH or is_odd_week()
 
 
 # ── Slack helper ──────────────────────────────────────────────────────────────
@@ -126,8 +140,12 @@ def _post_slack_summary(
 def run() -> None:
     logger.info("=" * 60)
     logger.info("Unikraft Event Scout — starting weekly run")
-    logger.info(f"Timestamp : {datetime.now(timezone.utc).isoformat()}")
-    logger.info(f"Dry run   : {DRY_RUN}")
+    logger.info(f"Timestamp        : {datetime.now(timezone.utc).isoformat()}")
+    logger.info(f"Dry run          : {DRY_RUN}")
+    logger.info(f"Next-edition search this run : {RUN_NEXT_EDITION} "
+                f"({'forced' if FORCE_WEB_SEARCH else 'first run of month' if RUN_NEXT_EDITION else 'throttled — skipped'})")
+    logger.info(f"CFP web search this run      : {RUN_CFP_SEARCH} "
+                f"({'forced' if FORCE_WEB_SEARCH else 'odd week' if RUN_CFP_SEARCH else 'throttled — skipped'})")
     logger.info("=" * 60)
 
     if not SPREADSHEET_ID and not DRY_RUN:
@@ -310,7 +328,13 @@ def run() -> None:
         except Exception as e:
             logger.warning(f"Could not read Time Passed sheet: {e}")
 
-    if time_passed_events:
+    if time_passed_events and not RUN_NEXT_EDITION:
+        logger.info(
+            f"Skipping next-edition web search this run (throttled — runs first week of month). "
+            f"{len(time_passed_events)} Time Passed conferences will be checked next cycle."
+        )
+
+    if time_passed_events and RUN_NEXT_EDITION:
         # Live web search: has a future edition been scheduled for each past conference?
         next_edition_conferences = check_all_next_editions(time_passed_events)
         # Filter out any next editions that are also in the past (shouldn't happen but be safe)
@@ -325,10 +349,16 @@ def run() -> None:
     # ── Step 6: Enrich all new conferences with live CFP data ─────────────────
     # New scraped conferences + newly found next editions get a live CFP web search
     # so their CFP Date / CFP Status columns are accurate at write time.
+    # Throttled to the CFP cadence to control cost.
     conferences_to_enrich = future_conferences + next_edition_conferences
-    if conferences_to_enrich:
+    if conferences_to_enrich and RUN_CFP_SEARCH:
         logger.info(f"Looking up live CFP status for {len(conferences_to_enrich)} new conferences...")
         enrich_with_cfp(conferences_to_enrich)
+    elif conferences_to_enrich:
+        logger.info(
+            f"Skipping CFP lookup for {len(conferences_to_enrich)} new conferences this run "
+            f"(throttled — runs on odd weeks). They'll be picked up by the CFP refresh next cycle."
+        )
 
     # ── Step 7: Dry run output ────────────────────────────────────────────────
     if DRY_RUN:
@@ -387,7 +417,7 @@ def run() -> None:
     # Re-reads the Conferences tab and does a live CFP web search for any row
     # whose CFP Status is blank, "Check site", or "Not yet announced". This keeps
     # CFP info current as deadlines open and close over time.
-    if REFRESH_CFP:
+    if REFRESH_CFP and RUN_CFP_SEARCH:
         try:
             refresh_client = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=CONFERENCES_SHEET)
             existing_rows = refresh_client.get_all_rows_with_index()
@@ -418,6 +448,8 @@ def run() -> None:
             logger.info(f"CFP refresh: updated {refreshed} conference rows")
         except Exception as e:
             logger.warning(f"CFP refresh step failed — continuing: {e}")
+    elif REFRESH_CFP:
+        logger.info("Skipping CFP refresh this run (throttled — runs on odd weeks).")
 
     # ── Step 10: Slack summary ────────────────────────────────────────────────
     _post_slack_summary(

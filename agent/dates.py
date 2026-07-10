@@ -71,3 +71,25 @@ def strip_year(name: str) -> str:
     """
     import re
     return re.sub(r"\s*\b(20\d{2})\b\s*", " ", name).strip()
+
+
+# ── Calendar-based throttling ────────────────────────────────────────────────
+# GitHub Actions checks out a fresh copy each run, so we can't rely on a stored
+# counter. Instead we throttle expensive web-search steps off the calendar,
+# which is deterministic and needs no persisted state.
+
+def is_first_run_of_month() -> bool:
+    """
+    True if today is within the first 7 days of the month.
+    Combined with a weekly (Monday) schedule, this fires on exactly the first
+    weekly run of each month — a natural cadence for the next-edition search.
+    """
+    return today().day <= 7
+
+
+def is_odd_week() -> bool:
+    """
+    True on odd-numbered ISO weeks — gives an every-other-week (biweekly) cadence
+    for the CFP refresh on a weekly schedule.
+    """
+    return (today().isocalendar().week % 2) == 1
