@@ -359,12 +359,39 @@ class SheetsClient:
         except HttpError as e:
             logger.error(f"Failed to delete rows from '{self.sheet_name}': {e}")
 
+    def ensure_sheet_exists(self) -> None:
+        """
+        Create this tab if it doesn't already exist in the spreadsheet.
+        Called before writing so a missing tab (e.g. 'SF Product Demos')
+        never crashes the run.
+        """
+        try:
+            meta = self.service.spreadsheets().get(
+                spreadsheetId=self.spreadsheet_id
+            ).execute()
+            existing_titles = {s["properties"]["title"] for s in meta.get("sheets", [])}
+            if self.sheet_name in existing_titles:
+                return
+            # Tab is missing — create it
+            self.service.spreadsheets().batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={"requests": [{
+                    "addSheet": {"properties": {"title": self.sheet_name}}
+                }]},
+            ).execute()
+            logger.info(f"'{self.sheet_name}': tab did not exist — created it")
+        except HttpError as e:
+            logger.error(f"Failed to ensure tab '{self.sheet_name}' exists: {e}")
+
     def ensure_header(self) -> None:
         """
         Write the header row starting at B1 (column A stays empty).
-        Safe to call every run — if B1 already has content the header is left
-        untouched so existing data is never overwritten.
+        Creates the tab first if it is missing, then — if B1 already has content —
+        leaves the header untouched so existing data is never overwritten.
         """
+        # Make sure the tab exists before touching it
+        self.ensure_sheet_exists()
+
         try:
             result = self.sheet.values().get(
                 spreadsheetId=self.spreadsheet_id,
