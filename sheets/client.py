@@ -413,34 +413,109 @@ class SheetsClient:
         ).execute()
         logger.info(f"'{self.sheet_name}': header row written at B1")
 
-    def append_events(self, events: list[dict]) -> int:
+    # Columns the agent manages automatically (safe to overwrite on refresh).
+    # Maps event-dict key → sheet column letter.
+    # Notes / Assignee / Attendees / Engagement / Comment are NEVER touched —
+    # those are for your team to fill in manually.
+    _AGENT_MANAGED_COLS = {
+        "category":   "C",
+        "cfp_date":   "D",
+        "cfp_status": "E",
+        "location":   "F",
+        "start_date": "G",
+        "end_date":   "H",
+        # Days (J) is recomputed whenever start/end change
+    }
+
+    def append_events(self, events: list[dict]) -> tuple[int, int]:
         """
-        Append a list of event dicts to the sheet, skipping duplicates.
-        Always writes an empty string into column A so data lands in B onward.
-        The agent leaves Notes, Assignee, Attendees, Engagement, Comment blank —
-        your team fills those in manually.
-        Returns the number of rows actually written.
+        Upsert a list of event dicts into the sheet.
+
+        For each event:
+          - If it already exists (matched by name or website URL), UPDATE the
+            agent-managed fields (category, CFP date/status, location, dates, days)
+            in place — but only for fields where the new value is non-empty and
+            actually different. Manual columns are never overwritten.
+          - If it's new, APPEND it as a new row.
+
+        Returns (num_added, num_updated).
         """
         if not events:
-            return 0
+            return 0, 0
 
-        existing_names, existing_urls = self.get_existing_names_and_urls()
-        rows_to_write = []
+        # Build a lookup of existing rows: name/url (lowercased) → full row dict w/ index
+        existing_rows = self.get_all_rows_with_index()
+        by_name: dict[str, dict] = {}
+        by_url: dict[str, dict] = {}
+        for row in existing_rows:
+            nm = (row.get("name", "") or "").strip().lower()
+            wu = (row.get("website", "") or "").strip().lower()
+            if nm:
+                by_name[nm] = row
+            if wu:
+                by_url[wu] = row
+
+        rows_to_append = []
+        update_data = []          # batchUpdate payload for changed cells
+        added_keys: set[str] = set()
+        num_updated = 0
 
         for ev in events:
             name = ev.get("name", "").strip()
             url = ev.get("website", "").strip()
+            nkey = name.lower()
+            ukey = url.lower()
 
-            # Deduplicate by name or URL
-            if name.lower() in existing_names or url.lower() in existing_urls:
-                logger.info(f"  DEDUP SKIP: '{name}' (already in sheet)")
+            match = by_name.get(nkey) or (by_url.get(ukey) if ukey else None)
+
+            if match:
+                # ── UPDATE existing row in place ──────────────────────────────
+                row_idx = match["_row_index"]
+                changed_fields = []
+
+                for field, col in self._AGENT_MANAGED_COLS.items():
+                    new_val = (ev.get(field, "") or "").strip()
+                    if not new_val:
+                        continue  # never blank out an existing value
+                    # Existing value lives under the lowercased header name
+                    header_key = field.replace("_", " ")  # start_date → "start date"
+                    old_val = (match.get(header_key, "") or "").strip()
+                    if new_val != old_val:
+                        update_data.append({
+                            "range": f"'{self.sheet_name}'!{col}{row_idx}",
+                            "values": [[new_val]],
+                        })
+                        changed_fields.append(field)
+
+                # Recompute Days if start or end changed
+                if "start_date" in changed_fields or "end_date" in changed_fields:
+                    start = ev.get("start_date", "") or match.get("start date", "")
+                    end = ev.get("end_date", "") or match.get("end date", "")
+                    days = _compute_days(start, end)
+                    if days:
+                        update_data.append({
+                            "range": f"'{self.sheet_name}'!J{row_idx}",
+                            "values": [[days]],
+                        })
+
+                if changed_fields:
+                    num_updated += 1
+                    logger.info(f"  UPDATE: '{name}' → changed {', '.join(changed_fields)}")
+                else:
+                    logger.info(f"  UNCHANGED: '{name}' (already up to date)")
                 continue
+
+            # ── APPEND new row ────────────────────────────────────────────────
+            if nkey in added_keys or (ukey and ukey in added_keys):
+                continue  # avoid dupes within this same batch
+            added_keys.add(nkey)
+            if ukey:
+                added_keys.add(ukey)
 
             start = ev.get("start_date", "")
             end = ev.get("end_date", "")
             days = _compute_days(start, end)
-
-            row = [
+            rows_to_append.append([
                 "",                          # A — always empty
                 name,                        # B — Name
                 ev.get("category", ""),      # C — Category
@@ -450,34 +525,42 @@ class SheetsClient:
                 start,                       # G — Start Date
                 end,                         # H — End Date
                 url,                         # I — Website
-                days,                        # J — Days (computed)
+                days,                        # J — Days
                 "",                          # K — Notes
                 "",                          # L — Assignee
                 "",                          # M — Attendees
                 "",                          # N — Engagement
                 "",                          # O — Comment
-            ]
-            rows_to_write.append(row)
+            ])
 
-            # Track to avoid writing the same event twice in one batch
-            existing_names.add(name.lower())
-            existing_urls.add(url.lower())
+        # Apply in-place updates
+        if update_data:
+            try:
+                self.sheet.values().batchUpdate(
+                    spreadsheetId=self.spreadsheet_id,
+                    body={"valueInputOption": "USER_ENTERED", "data": update_data},
+                ).execute()
+                logger.info(f"'{self.sheet_name}': updated {num_updated} existing events")
+            except HttpError as e:
+                logger.error(f"Failed to update rows in '{self.sheet_name}': {e}")
 
-        if not rows_to_write:
-            logger.info(f"'{self.sheet_name}': no new events to write — all duplicates")
-            return 0
+        # Append new rows
+        num_added = 0
+        if rows_to_append:
+            try:
+                self.sheet.values().append(
+                    spreadsheetId=self.spreadsheet_id,
+                    range=self._range("A", LAST_COL),
+                    valueInputOption="USER_ENTERED",
+                    insertDataOption="INSERT_ROWS",
+                    body={"values": rows_to_append},
+                ).execute()
+                num_added = len(rows_to_append)
+                logger.info(f"'{self.sheet_name}': added {num_added} new events")
+            except HttpError as e:
+                logger.error(f"Failed to append rows to '{self.sheet_name}': {e}")
 
-        try:
-            self.sheet.values().append(
-                spreadsheetId=self.spreadsheet_id,
-                range=self._range("A", LAST_COL),
-                valueInputOption="USER_ENTERED",
-                insertDataOption="INSERT_ROWS",
-                body={"values": rows_to_write},
-            ).execute()
-            logger.info(f"'{self.sheet_name}': wrote {len(rows_to_write)} new events")
-        except HttpError as e:
-            logger.error(f"Failed to append rows to '{self.sheet_name}': {e}")
-            return 0
+        if num_added == 0 and num_updated == 0:
+            logger.info(f"'{self.sheet_name}': nothing to add or update")
 
-        return len(rows_to_write)
+        return num_added, num_updated

@@ -205,13 +205,14 @@ def run() -> None:
                     sheet_name=TIME_PASSED_SHEET,
                 )
                 tp_migration_client.ensure_header()
-                written = tp_migration_client.append_events(events_to_migrate)
-                logger.info(f"Migrated {written} past conferences to '{TIME_PASSED_SHEET}'")
+                added, updated = tp_migration_client.append_events(events_to_migrate)
+                logger.info(f"Migrated {added} past conferences to '{TIME_PASSED_SHEET}'")
 
-                # Only delete from Conferences after successful write
-                if written > 0:
+                # Delete from Conferences as long as the migration persisted them
+                # (either newly added, or already present/updated in Time Passed)
+                if added > 0 or updated > 0:
                     conf_migration_client.delete_rows_by_index(row_indices_to_delete)
-                    migrated_to_time_passed = events_to_migrate[:written]
+                    migrated_to_time_passed = events_to_migrate
             else:
                 logger.info("No past conferences to migrate from Conferences tab")
 
@@ -396,39 +397,41 @@ def run() -> None:
     conf_sheet = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=CONFERENCES_SHEET)
     conf_sheet.ensure_header()
     all_conferences_to_write = future_conferences + next_edition_conferences
-    logger.info(f"Writing {len(all_conferences_to_write)} entries to '{CONFERENCES_SHEET}'...")
-    written_conf = conf_sheet.append_events(all_conferences_to_write)
+    logger.info(f"Upserting {len(all_conferences_to_write)} entries to '{CONFERENCES_SHEET}'...")
+    added_conf, updated_conf = conf_sheet.append_events(all_conferences_to_write)
 
     # Meet-ups tab: selected general meetups (SF/Berlin/Munich, capped per week)
     meetup_sheet = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=MEETUPS_SHEET)
     meetup_sheet.ensure_header()
-    logger.info(f"Writing {len(general_meetups)} entries to '{MEETUPS_SHEET}'...")
-    written_meetups = meetup_sheet.append_events(general_meetups)
+    logger.info(f"Upserting {len(general_meetups)} entries to '{MEETUPS_SHEET}'...")
+    added_meetups, updated_meetups = meetup_sheet.append_events(general_meetups)
 
     # SF Product Demos tab: San Francisco meetups suitable for a product demo
     sf_demo_sheet = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=SF_DEMOS_SHEET)
     sf_demo_sheet.ensure_header()
-    logger.info(f"Writing {len(sf_demo_meetups)} entries to '{SF_DEMOS_SHEET}'...")
-    written_sf_demos = sf_demo_sheet.append_events(sf_demo_meetups)
+    logger.info(f"Upserting {len(sf_demo_meetups)} entries to '{SF_DEMOS_SHEET}'...")
+    added_sf_demos, updated_sf_demos = sf_demo_sheet.append_events(sf_demo_meetups)
 
     # Time Passed tab: past conferences
     tp_sheet = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=TIME_PASSED_SHEET)
     tp_sheet.ensure_header()
-    logger.info(f"Writing {len(past_conferences)} entries to '{TIME_PASSED_SHEET}'...")
-    written_tp = tp_sheet.append_events(past_conferences)
+    logger.info(f"Upserting {len(past_conferences)} entries to '{TIME_PASSED_SHEET}'...")
+    added_tp, updated_tp = tp_sheet.append_events(past_conferences)
+
+    total_added = added_conf + added_meetups + added_sf_demos + added_tp
+    total_updated = updated_conf + updated_meetups + updated_sf_demos + updated_tp
 
     logger.info(
-        f"Done. "
-        f"{written_conf} → '{CONFERENCES_SHEET}' | "
-        f"{written_meetups} → '{MEETUPS_SHEET}' | "
-        f"{written_sf_demos} → '{SF_DEMOS_SHEET}' | "
-        f"{written_tp} → '{TIME_PASSED_SHEET}'"
+        f"Done. Added {total_added}, updated {total_updated}. "
+        f"Conferences +{added_conf}/~{updated_conf} | "
+        f"Meet-ups +{added_meetups}/~{updated_meetups} | "
+        f"SF Demos +{added_sf_demos}/~{updated_sf_demos} | "
+        f"Time Passed +{added_tp}/~{updated_tp}  (+added / ~updated)"
     )
 
-    if written_conf + written_meetups + written_sf_demos + written_tp == 0:
-        logger.warning(
-            "ZERO rows written. All classified events are likely already in the sheet. "
-            "Check DEDUP SKIP lines above to confirm."
+    if total_added == 0 and total_updated == 0:
+        logger.info(
+            "No changes this run — every event found is already in the sheet and up to date."
         )
 
     # ── Step 9: Refresh CFP status on conferences already in the sheet ────────
@@ -471,9 +474,9 @@ def run() -> None:
 
     # ── Step 10: Slack summary ────────────────────────────────────────────────
     _post_slack_summary(
-        new_conferences=future_conferences[:written_conf],
-        new_meetups=(general_meetups[:written_meetups] + sf_demo_meetups[:written_sf_demos]),
-        new_time_passed=past_conferences[:written_tp],
+        new_conferences=future_conferences[:added_conf],
+        new_meetups=(general_meetups[:added_meetups] + sf_demo_meetups[:added_sf_demos]),
+        new_time_passed=past_conferences[:added_tp],
         next_editions=next_edition_conferences,
     )
 
