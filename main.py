@@ -50,6 +50,7 @@ from agent import (
     enrich_with_cfp,
     find_cfp,
     select_meetups,
+    discover_conferences,
     is_future,
     is_past,
     is_first_run_of_month,
@@ -250,6 +251,32 @@ def run() -> None:
     cncf_events = scrape_cncf()
 
     all_raw = luma_events + techmeme_events + cncf_events
+    logger.info(f"Total events from scrapers: {len(all_raw)}")
+
+    # ── Step 2b: Active conference discovery via web search ───────────────────
+    # The fixed scrapers return the same set each run. This step actively hunts
+    # the web for NEW conferences relevant to Unikraft that aren't already tracked.
+    # Runs on the next-edition (monthly / forced) cadence to control cost.
+    if RUN_NEXT_EDITION and SPREADSHEET_ID:
+        try:
+            # Gather names already in Conferences + Time Passed to avoid rediscovering them
+            known_names: set[str] = set()
+            for tab in (CONFERENCES_SHEET, TIME_PASSED_SHEET):
+                try:
+                    c = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=tab)
+                    names, _ = c.get_existing_names_and_urls()
+                    known_names |= names
+                except Exception:
+                    pass
+            discovered = discover_conferences(known_names=known_names)
+            if discovered:
+                logger.info(f"Discovery added {len(discovered)} new candidate conferences to the pipeline")
+                all_raw = all_raw + discovered
+        except Exception as e:
+            logger.warning(f"Conference discovery step failed — continuing without it: {e}")
+    else:
+        logger.info("Skipping conference discovery this run (throttled — runs first week of month or when forced).")
+
     logger.info(f"Total raw events collected: {len(all_raw)}")
 
     if not all_raw:
