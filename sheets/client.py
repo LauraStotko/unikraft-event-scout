@@ -279,6 +279,35 @@ class SheetsClient:
         logger.info(f"'{self.sheet_name}': read {len(result_rows)} rows with index")
         return result_rows
 
+    def update_cfp_cells(self, row_index: int, cfp_date: str, cfp_status: str) -> None:
+        """
+        Update the CFP Date (column D) and CFP Status (column E) of a single row.
+        row_index is the 1-based Google Sheets row number.
+        Only writes non-empty values so we never blank out existing manual data.
+        """
+        data = []
+        if cfp_date:
+            data.append({
+                "range": f"'{self.sheet_name}'!D{row_index}",
+                "values": [[cfp_date]],
+            })
+        if cfp_status:
+            data.append({
+                "range": f"'{self.sheet_name}'!E{row_index}",
+                "values": [[cfp_status]],
+            })
+
+        if not data:
+            return
+
+        try:
+            self.sheet.values().batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={"valueInputOption": "USER_ENTERED", "data": data},
+            ).execute()
+        except HttpError as e:
+            logger.error(f"Failed to update CFP cells for row {row_index} in '{self.sheet_name}': {e}")
+
     def delete_rows_by_index(self, row_indices: list[int]) -> None:
         """
         Delete specific rows from this sheet by their 1-based row index.

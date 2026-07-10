@@ -44,7 +44,14 @@ except ImportError:
     pass
 
 from scrapers import scrape_luma, scrape_techmeme, scrape_cncf
-from agent import classify_batch, check_all_next_editions, is_future, is_past
+from agent import (
+    classify_batch,
+    check_all_next_editions,
+    enrich_with_cfp,
+    find_cfp,
+    is_future,
+    is_past,
+)
 from sheets import SheetsClient
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -63,6 +70,8 @@ EXCLUDED_SHEET    = os.environ.get("EXCLUDED_SHEET", "Excluded")
 TIME_PASSED_SHEET = os.environ.get("TIME_PASSED_SHEET", "Time Passed")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 DRY_RUN           = os.environ.get("DRY_RUN", "false").lower() == "true"
+# Refresh CFP status on conferences already in the sheet each run (uses web search)
+REFRESH_CFP       = os.environ.get("REFRESH_CFP", "true").lower() == "true"
 
 
 # ── Slack helper ──────────────────────────────────────────────────────────────
@@ -302,6 +311,7 @@ def run() -> None:
             logger.warning(f"Could not read Time Passed sheet: {e}")
 
     if time_passed_events:
+        # Live web search: has a future edition been scheduled for each past conference?
         next_edition_conferences = check_all_next_editions(time_passed_events)
         # Filter out any next editions that are also in the past (shouldn't happen but be safe)
         next_edition_conferences = [
@@ -312,12 +322,23 @@ def run() -> None:
         for ev in next_edition_conferences:
             logger.info(f"  NEXT EDITION: {ev.get('name')} | {ev.get('start_date')} | {ev.get('location')}")
 
-    # ── Step 6: Dry run output ────────────────────────────────────────────────
+    # ── Step 6: Enrich all new conferences with live CFP data ─────────────────
+    # New scraped conferences + newly found next editions get a live CFP web search
+    # so their CFP Date / CFP Status columns are accurate at write time.
+    conferences_to_enrich = future_conferences + next_edition_conferences
+    if conferences_to_enrich:
+        logger.info(f"Looking up live CFP status for {len(conferences_to_enrich)} new conferences...")
+        enrich_with_cfp(conferences_to_enrich)
+
+    # ── Step 7: Dry run output ────────────────────────────────────────────────
     if DRY_RUN:
         logger.info("DRY RUN — no writes. Summary of what would happen:")
         logger.info(f"  → '{CONFERENCES_SHEET}' ({len(future_conferences)} future + {len(next_edition_conferences)} next editions):")
         for ev in future_conferences + next_edition_conferences:
-            logger.info(f"      • {ev.get('name')} | {ev.get('start_date')} | {ev.get('location')}")
+            cfp = f" | CFP: {ev.get('cfp_status','?')}"
+            if ev.get("cfp_date"):
+                cfp += f" (by {ev.get('cfp_date')})"
+            logger.info(f"      • {ev.get('name')} | {ev.get('start_date')} | {ev.get('location')}{cfp}")
             if ev.get("relevance_note"):
                 logger.info(f"        ↳ {ev.get('relevance_note')}")
         logger.info(f"  → '{MEETUPS_SHEET}' ({len(future_meetups)} events):")
@@ -328,7 +349,7 @@ def run() -> None:
             logger.info(f"      • {ev.get('name')} | {ev.get('start_date')}")
         return
 
-    # ── Step 7: Write to sheets ───────────────────────────────────────────────
+    # ── Step 8: Write to sheets ───────────────────────────────────────────────
 
     # Conferences tab: future scraped + next editions from Time Passed
     conf_sheet = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=CONFERENCES_SHEET)
@@ -362,7 +383,43 @@ def run() -> None:
             "Check DEDUP SKIP lines above to confirm."
         )
 
-    # ── Step 8: Slack summary ─────────────────────────────────────────────────
+    # ── Step 9: Refresh CFP status on conferences already in the sheet ────────
+    # Re-reads the Conferences tab and does a live CFP web search for any row
+    # whose CFP Status is blank, "Check site", or "Not yet announced". This keeps
+    # CFP info current as deadlines open and close over time.
+    if REFRESH_CFP:
+        try:
+            refresh_client = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=CONFERENCES_SHEET)
+            existing_rows = refresh_client.get_all_rows_with_index()
+
+            # Only refresh rows that need it (blank / unknown / to-be-checked status)
+            # and whose event is still in the future
+            needs_refresh = []
+            for row in existing_rows:
+                status = (row.get("cfp status", "") or row.get("cfp_status", "")).strip().lower()
+                start = row.get("start date", "") or row.get("start_date", "")
+                if is_past(start):
+                    continue
+                if status in ("", "check site", "not yet announced", "unknown"):
+                    needs_refresh.append(row)
+
+            logger.info(f"CFP refresh: {len(needs_refresh)} existing conferences need a CFP check")
+
+            refreshed = 0
+            for row in needs_refresh:
+                cfp = find_cfp(row)
+                if cfp and (cfp.get("cfp_status") or cfp.get("cfp_date")):
+                    refresh_client.update_cfp_cells(
+                        row_index=row["_row_index"],
+                        cfp_date=cfp.get("cfp_date", ""),
+                        cfp_status=cfp.get("cfp_status", ""),
+                    )
+                    refreshed += 1
+            logger.info(f"CFP refresh: updated {refreshed} conference rows")
+        except Exception as e:
+            logger.warning(f"CFP refresh step failed — continuing: {e}")
+
+    # ── Step 10: Slack summary ────────────────────────────────────────────────
     _post_slack_summary(
         new_conferences=future_conferences[:written_conf],
         new_meetups=future_meetups[:written_meetups],
