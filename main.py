@@ -77,14 +77,17 @@ SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 DRY_RUN           = os.environ.get("DRY_RUN", "false").lower() == "true"
 
 # ── Web-search throttling (cost control) ──────────────────────────────────────
-# The scrape + classify steps run every week (cheap). The expensive web-search
-# steps are throttled off the calendar so they don't run on every weekly run:
+# Conference DISCOVERY runs EVERY run so new events surface each time — this is
+# what keeps the tracker growing beyond the fixed scraper pages.
+#
+# The two heavier, repeat-cost web-search steps stay throttled off the calendar:
 #   - Next-edition search : first weekly run of each month
 #   - CFP web search       : every other week (odd ISO weeks)
-# Set FORCE_WEB_SEARCH=true (e.g. via manual workflow_dispatch) to run them now
-# regardless of the calendar.
+# Set FORCE_WEB_SEARCH=true (e.g. via manual workflow_dispatch) to force those now.
+# Set RUN_DISCOVERY=false to disable discovery (e.g. to cut cost temporarily).
 FORCE_WEB_SEARCH  = os.environ.get("FORCE_WEB_SEARCH", "false").lower() == "true"
 REFRESH_CFP       = os.environ.get("REFRESH_CFP", "true").lower() == "true"
+RUN_DISCOVERY     = os.environ.get("RUN_DISCOVERY", "true").lower() == "true"
 
 # Resolve throttle decisions once at startup
 RUN_NEXT_EDITION  = FORCE_WEB_SEARCH or is_first_run_of_month()
@@ -145,6 +148,8 @@ def run() -> None:
     logger.info("Unikraft Event Scout — starting weekly run")
     logger.info(f"Timestamp        : {datetime.now(timezone.utc).isoformat()}")
     logger.info(f"Dry run          : {DRY_RUN}")
+    logger.info(f"Conference discovery this run: {RUN_DISCOVERY} "
+                f"({'every run' if RUN_DISCOVERY else 'disabled'})")
     logger.info(f"Next-edition search this run : {RUN_NEXT_EDITION} "
                 f"({'forced' if FORCE_WEB_SEARCH else 'first run of month' if RUN_NEXT_EDITION else 'throttled — skipped'})")
     logger.info(f"CFP web search this run      : {RUN_CFP_SEARCH} "
@@ -256,8 +261,8 @@ def run() -> None:
     # ── Step 2b: Active conference discovery via web search ───────────────────
     # The fixed scrapers return the same set each run. This step actively hunts
     # the web for NEW conferences relevant to Unikraft that aren't already tracked.
-    # Runs on the next-edition (monthly / forced) cadence to control cost.
-    if RUN_NEXT_EDITION and SPREADSHEET_ID:
+    # Runs on EVERY run so the tracker keeps growing beyond the fixed pages.
+    if RUN_DISCOVERY and SPREADSHEET_ID:
         try:
             # Gather names already in Conferences + Time Passed to avoid rediscovering them
             known_names: set[str] = set()
@@ -274,8 +279,8 @@ def run() -> None:
                 all_raw = all_raw + discovered
         except Exception as e:
             logger.warning(f"Conference discovery step failed — continuing without it: {e}")
-    else:
-        logger.info("Skipping conference discovery this run (throttled — runs first week of month or when forced).")
+    elif not RUN_DISCOVERY:
+        logger.info("Conference discovery disabled (RUN_DISCOVERY=false).")
 
     logger.info(f"Total raw events collected: {len(all_raw)}")
 
