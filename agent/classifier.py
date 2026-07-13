@@ -207,7 +207,7 @@ Your job: given a raw event scraped from the web, determine:
 2. If yes, extract the structured fields below.
 
 RELEVANCE RULES:
-- MEETUPS: only include local meetups in San Francisco, Berlin, or Munich. Meetups in any other city are NOT relevant — mark them relevant=false. Within these three cities, only include a meetup if ACTUAL POTENTIAL CLIENTS would be present: engineers, CTOs, platform/infra leads, or technical founders who build or buy cloud infrastructure. Be selective — a purely social mixer, a beginner workshop, or a non-technical networking event is NOT worth attending even if it is in one of these cities.
+- MEETUPS: only include local meetups in San Francisco, Munich, Berlin, Bucharest, or London. Meetups in any other city are NOT relevant — mark them relevant=false. Within these five cities, only include a meetup if ACTUAL POTENTIAL CLIENTS would be present: DevOps engineers, software developers, agentic-AI / AI developers, platform/infra leads, CTOs, or technical founders who build or buy cloud infrastructure. Be selective — a purely social mixer, a beginner workshop, or a non-technical networking event is NOT worth attending even if it is in one of these cities.
 - Global conferences: only include if clearly relevant to cloud infrastructure, AI agents, serverless, platform engineering, or DevOps — AND if the audience includes people who make or influence infrastructure decisions.
 - Always ask: "Would a CTO or platform engineer at an AI startup attend this, and could we meet potential customers there?" If not clearly yes, mark relevant=false.
 

@@ -1,19 +1,21 @@
 """
 agent/discovery.py
 
-Active conference DISCOVERY via live web search.
+Active event DISCOVERY via live web search.
 
-The fixed scrapers (Techmeme, Luma, CNCF list) return the same limited set of
-events every run. This module goes further: it asks Claude to actively search
-the web for conferences relevant to Unikraft Cloud that are NOT already in the
-sheet — so genuinely new events surface over time.
+The fixed scrapers return the same limited set of events every run. This module
+goes further: on EVERY run it asks Claude to actively search the web (Google +
+Techmeme focus) for NEW events relevant to Unikraft Cloud that are not already
+in the sheet — so the tracker keeps growing.
 
-It runs on the same throttled cadence as the next-edition search (monthly, or
-forced) to keep web-search costs controlled.
+It runs three kinds of search:
+  1. Conferences with an OPEN Call for Papers (we can still submit a talk)
+  2. Conferences coming up SOON where tickets are still on sale (we can attend)
+  3. Meetups in SF / Munich / Berlin / Bucharest / London with a DevOps,
+     developer, or agentic-AI audience — including SF events good for a demo.
 
-Output events are returned as raw dicts in the same shape the scrapers produce,
-so they flow through the normal classify → date-filter → upsert pipeline. That
-means the existing relevance classifier and Excluded-sheet learning still apply.
+All output is returned as raw event dicts in the same shape the scrapers produce,
+so everything flows through the normal classify → date-filter → upsert pipeline.
 """
 
 import logging
@@ -25,59 +27,136 @@ from .dates import today
 
 logger = logging.getLogger(__name__)
 
+# Minimum brand-new events we try to add each run.
+MIN_NEW_EVENTS_PER_RUN = 5
 
-# Themed searches — each targets a slice of Unikraft's relevant conference space.
-# Keeping them separate produces better, more focused search results than one
-# giant query.
-DISCOVERY_TOPICS = [
-    "cloud-native and Kubernetes conferences",
-    "AI infrastructure and AI agent / agentic AI conferences",
-    "serverless, platform engineering and DevOps conferences",
-    "confidential computing, virtualization and systems conferences",
-]
+UNIKRAFT_ONE_LINER = (
+    "Unikraft Cloud is a next-generation cloud infrastructure company "
+    "(millisecond cold starts, VM-level isolation, runs any Docker workload; "
+    "use cases: AI agents, serverless databases, headless browsers, FaaS, build pipelines)."
+)
 
-DISCOVERY_PROMPT = """You are scouting conferences for Unikraft Cloud, a next-generation cloud
-infrastructure company (millisecond cold starts, VM-level isolation, runs any Docker workload;
-use cases: AI agents, serverless databases, headless browsers, FaaS, build pipelines).
+MEETUP_CITIES = ["San Francisco", "Munich", "Berlin", "Bucharest", "London"]
+
+
+# ── Conference search: CFP still open ─────────────────────────────────────────
+CFP_OPEN_PROMPT = """You are scouting conferences for Unikraft Cloud.
+{unikraft}
 
 Today's date is: {today}
 
-TASK: Search the web to find UPCOMING {topic} that would be valuable for Unikraft Cloud to
-attend or speak at — where potential customers (CTOs, platform engineers, infra decision-makers,
-technical founders building AI / cloud products) will be present.
+TASK: Use web search (prioritise Google and Techmeme) to find UPCOMING conferences relevant to
+Unikraft Cloud — cloud-native, Kubernetes, AI infrastructure, agentic AI, serverless, platform
+engineering, DevOps, or confidential computing — where the CALL FOR PAPERS (CFP) IS STILL OPEN
+(deadline is after today, submissions still accepted).
 
-Requirements:
-- Events must start AFTER today ({today}). Ignore past events.
-- Focus on real, named, scheduled conferences (not generic listicles).
-- Prefer well-known industry events and strong regional events.
-- Do NOT include the following events, which are already tracked:
+The audience should include CTOs, platform/infra engineers, or technical founders — potential
+Unikraft customers.
+
+Do NOT include these already-tracked events:
 {known_names}
 
-Find as many genuinely relevant upcoming conferences as you can (aim for 5-10 good ones).
-For each, get the real dates and location from the official site or a reputable listing.
+Find at least {want} good ones. Verify the CFP is genuinely open from the official site.
 
 End your reply with EXACTLY ONE JSON object (no other text after it):
 {{
-  "conferences": [
+  "events": [
     {{
-      "name": "Official conference name (with year)",
+      "name": "Conference name (with year)",
       "location": "City, Country",
       "start_date": "MMM DD, YYYY",
       "end_date": "MMM DD, YYYY or empty string",
       "website": "official URL",
-      "why_relevant": "one short phrase on the audience / topic fit"
+      "cfp_status": "Open",
+      "cfp_date": "CFP deadline MMM DD, YYYY or empty string",
+      "why_relevant": "one short phrase on audience / topic fit"
     }}
   ]
 }}
-Only include conferences you found real evidence for. If you cannot find dates, omit that event."""
+Only include events with real evidence of an open CFP."""
+
+
+# ── Conference search: upcoming, tickets on sale ──────────────────────────────
+TICKETS_PROMPT = """You are scouting conferences for Unikraft Cloud.
+{unikraft}
+
+Today's date is: {today}
+
+TASK: Use web search (prioritise Google and Techmeme) to find conferences COMING UP SOON
+(in roughly the next 4 months) relevant to Unikraft Cloud — cloud-native, Kubernetes, AI
+infrastructure, agentic AI, serverless, platform engineering, DevOps, confidential computing —
+where TICKETS ARE STILL ON SALE so we could attend.
+
+The audience should include CTOs, platform/infra engineers, or technical founders — potential
+Unikraft customers.
+
+Do NOT include these already-tracked events:
+{known_names}
+
+Find at least {want} good ones. Verify from the official site that tickets/registration are open.
+
+End your reply with EXACTLY ONE JSON object (no other text after it):
+{{
+  "events": [
+    {{
+      "name": "Conference name (with year)",
+      "location": "City, Country",
+      "start_date": "MMM DD, YYYY",
+      "end_date": "MMM DD, YYYY or empty string",
+      "website": "official URL",
+      "cfp_status": "Tickets on sale",
+      "why_relevant": "one short phrase on audience / topic fit"
+    }}
+  ]
+}}
+Only include events you found real evidence for (dates + open registration)."""
+
+
+# ── Meetup search ─────────────────────────────────────────────────────────────
+MEETUP_PROMPT = """You are scouting local tech MEETUPS for Unikraft Cloud.
+{unikraft}
+
+Today's date is: {today}
+
+TASK: Use web search (prioritise Google and Techmeme) to find UPCOMING meetups in these cities:
+{cities}.
+
+Only include meetups whose audience is primarily DevOps engineers, software developers, or
+agentic-AI / AI developers — people who could be Unikraft Cloud users or customers. Skip purely
+social, non-technical, or beginner networking events.
+
+Also identify, for San Francisco only, meetups whose format would let us give a live PRODUCT DEMO
+(demo nights, show-and-tell, startup showcases, hackathons) — mark those with "demo_suitable": true.
+
+Events must start AFTER today ({today}).
+
+Do NOT include these already-tracked events:
+{known_names}
+
+Find at least {want} good ones across the cities.
+
+End your reply with EXACTLY ONE JSON object (no other text after it):
+{{
+  "events": [
+    {{
+      "name": "Meetup name",
+      "location": "City, Country",
+      "start_date": "MMM DD, YYYY",
+      "end_date": "MMM DD, YYYY or empty string",
+      "website": "URL",
+      "demo_suitable": true or false,
+      "why_relevant": "one short phrase on audience / topic fit"
+    }}
+  ]
+}}
+Only include meetups you found real evidence for."""
 
 
 def _known_names_block(known_names: set[str]) -> str:
-    """Format the already-tracked names for the prompt (cap to keep prompt small)."""
+    """Format already-tracked names for the prompt (capped to keep it small)."""
     if not known_names:
         return "  (none yet)"
     names = sorted(known_names)
-    # Cap at 60 names to keep the prompt manageable
     shown = names[:60]
     lines = "\n".join(f"  - {n}" for n in shown)
     if len(names) > 60:
@@ -85,61 +164,107 @@ def _known_names_block(known_names: set[str]) -> str:
     return lines
 
 
-def discover_conferences(
-    known_names: Optional[set[str]] = None,
-    max_searches_per_topic: int = 2,
-) -> list[dict]:
+def _run_search(prompt: str, source_label: str, known_names: set[str],
+                seen: set[str], extra: Optional[dict] = None,
+                max_searches: int = 3) -> list[dict]:
+    """Run one web search, parse the 'events' array into raw event dicts."""
+    result = search_and_extract(prompt, max_searches=max_searches, max_tokens=2000)
+    if not result or "events" not in result:
+        logger.info(f"  [{source_label}] no results")
+        return []
+
+    out = []
+    for c in result["events"]:
+        name = (c.get("name", "") or "").strip()
+        if not name:
+            continue
+        nkey = name.lower()
+        if nkey in known_names or nkey in seen:
+            continue
+        seen.add(nkey)
+        ev = {
+            "name": name,
+            "source": f"Web discovery ({source_label})",
+            "raw_location": c.get("location", ""),
+            "raw_start_date": c.get("start_date", ""),
+            "raw_end_date": c.get("end_date", ""),
+            "website": c.get("website", ""),
+            "card_text": f"{source_label}. {c.get('why_relevant', '')}",
+            "scraped_at": datetime.now(timezone.utc).isoformat(),
+        }
+        # Carry through CFP hints and demo flag when present
+        if c.get("cfp_status"):
+            ev["cfp_status"] = c["cfp_status"]
+        if c.get("cfp_date"):
+            ev["cfp_date"] = c["cfp_date"]
+        if "demo_suitable" in c:
+            ev["hint_demo_suitable"] = bool(c["demo_suitable"])
+        if extra:
+            ev.update(extra)
+        out.append(ev)
+    logger.info(f"  [{source_label}] found {len(out)} new candidates")
+    return out
+
+
+def discover_events(known_names: Optional[set[str]] = None) -> list[dict]:
     """
-    Web-search for new conferences across all discovery topics.
+    Run all discovery searches (CFP-open conferences, ticketed conferences,
+    and meetups) and return a combined list of new raw event dicts.
 
-    Args:
-        known_names: lowercased names already in the sheet, to exclude.
-        max_searches_per_topic: web searches allowed per topic query.
-
-    Returns:
-        A list of raw event dicts (same shape scrapers produce) for classification.
-        Duplicates against known_names and within the batch are removed.
+    Tries to surface at least MIN_NEW_EVENTS_PER_RUN brand-new events; if the
+    first pass falls short, it runs one broader retry. If still short, it returns
+    what it found (never pads with junk) and logs a warning.
     """
     known_names = {n.strip().lower() for n in (known_names or set())}
     known_block = _known_names_block(known_names)
-
-    found: list[dict] = []
     seen: set[str] = set()
+    found: list[dict] = []
 
-    logger.info(f"Conference discovery: searching {len(DISCOVERY_TOPICS)} topics via web search...")
+    logger.info("Event discovery: searching web (Google + Techmeme focus)...")
 
-    for topic in DISCOVERY_TOPICS:
-        prompt = DISCOVERY_PROMPT.format(
-            today=today().strftime("%B %d, %Y"),
-            topic=topic,
-            known_names=known_block,
+    want = MIN_NEW_EVENTS_PER_RUN
+
+    # 1. Conferences with open CFP
+    found += _run_search(
+        CFP_OPEN_PROMPT.format(unikraft=UNIKRAFT_ONE_LINER, today=today().strftime("%B %d, %Y"),
+                               known_names=known_block, want=want),
+        "CFP-open conference", known_names, seen,
+    )
+    # 2. Conferences with tickets on sale
+    found += _run_search(
+        TICKETS_PROMPT.format(unikraft=UNIKRAFT_ONE_LINER, today=today().strftime("%B %d, %Y"),
+                              known_names=known_block, want=want),
+        "ticketed conference", known_names, seen,
+    )
+    # 3. Meetups across the focus cities
+    found += _run_search(
+        MEETUP_PROMPT.format(unikraft=UNIKRAFT_ONE_LINER, today=today().strftime("%B %d, %Y"),
+                             cities=", ".join(MEETUP_CITIES), known_names=known_block, want=want),
+        "meetup", known_names, seen,
+    )
+
+    # Ensure we tried hard to reach the minimum — one broader retry if short
+    if len(found) < MIN_NEW_EVENTS_PER_RUN:
+        logger.info(
+            f"Only {len(found)} new events so far (< {MIN_NEW_EVENTS_PER_RUN}); "
+            f"running one broader retry search..."
         )
-        result = search_and_extract(prompt, max_searches=max_searches_per_topic, max_tokens=1500)
-        if not result or "conferences" not in result:
-            logger.info(f"  [{topic}] no results")
-            continue
+        broad = (
+            f"{UNIKRAFT_ONE_LINER}\nToday is {today().strftime('%B %d, %Y')}. "
+            f"Use web search (Google + Techmeme) to find ANY upcoming conferences or meetups "
+            f"(cloud-native, Kubernetes, AI infra, agentic AI, serverless, DevOps, platform "
+            f"engineering) starting after today that a cloud-infrastructure company should attend. "
+            f"Exclude these already-tracked events:\n{known_block}\n"
+            f"Return EXACTLY ONE JSON object: "
+            f'{{"events":[{{"name":"","location":"","start_date":"","end_date":"","website":"","why_relevant":""}}]}}'
+        )
+        found += _run_search(broad, "broad retry", known_names, seen, max_searches=4)
 
-        topic_count = 0
-        for c in result["conferences"]:
-            name = (c.get("name", "") or "").strip()
-            if not name:
-                continue
-            nkey = name.lower()
-            if nkey in known_names or nkey in seen:
-                continue
-            seen.add(nkey)
-            topic_count += 1
-            found.append({
-                "name": name,
-                "source": "Web discovery",
-                "raw_location": c.get("location", ""),
-                "raw_start_date": c.get("start_date", ""),
-                "raw_end_date": c.get("end_date", ""),
-                "website": c.get("website", ""),
-                "card_text": f"{topic}. {c.get('why_relevant', '')}",
-                "scraped_at": datetime.now(timezone.utc).isoformat(),
-            })
-        logger.info(f"  [{topic}] found {topic_count} new candidate conferences")
+    if len(found) < MIN_NEW_EVENTS_PER_RUN:
+        logger.warning(
+            f"Discovery found only {len(found)} new events this run "
+            f"(target was {MIN_NEW_EVENTS_PER_RUN}). Adding what was found without padding."
+        )
 
-    logger.info(f"Conference discovery complete: {len(found)} new candidates found")
+    logger.info(f"Event discovery complete: {len(found)} new candidates found")
     return found

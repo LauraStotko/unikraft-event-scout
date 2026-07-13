@@ -50,7 +50,7 @@ from agent import (
     enrich_with_cfp,
     find_cfp,
     select_meetups,
-    discover_conferences,
+    discover_events,
     is_future,
     is_past,
     is_first_run_of_month,
@@ -245,6 +245,26 @@ def run() -> None:
         except Exception as e:
             logger.warning(f"Could not preview migration in dry run: {e}")
 
+    # ── Step 1b: Remove past meetups from Meet-ups and SF Product Demos ────────
+    # Meetups aren't archived (unlike conferences) — once they've happened they're
+    # just deleted so the lists only show upcoming events.
+    if SPREADSHEET_ID and not DRY_RUN:
+        for tab in (MEETUPS_SHEET, SF_DEMOS_SHEET):
+            try:
+                mc = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=tab)
+                rows = mc.get_all_rows_with_index()
+                past_idx = [
+                    r["_row_index"] for r in rows
+                    if is_past(r.get("start date", "") or r.get("start_date", ""))
+                ]
+                if past_idx:
+                    logger.info(f"'{tab}': removing {len(past_idx)} past meetups")
+                    mc.delete_rows_by_index(past_idx)
+                else:
+                    logger.info(f"'{tab}': no past meetups to remove")
+            except Exception as e:
+                logger.warning(f"Could not clean past meetups from '{tab}': {e}")
+
     # ── Step 2: Scrape ────────────────────────────────────────────────────────
     logger.info("Scraping Luma...")
     luma_events = scrape_luma()
@@ -258,29 +278,32 @@ def run() -> None:
     all_raw = luma_events + techmeme_events + cncf_events
     logger.info(f"Total events from scrapers: {len(all_raw)}")
 
-    # ── Step 2b: Active conference discovery via web search ───────────────────
+    # ── Step 2b: Active event discovery via web search ────────────────────────
     # The fixed scrapers return the same set each run. This step actively hunts
-    # the web for NEW conferences relevant to Unikraft that aren't already tracked.
-    # Runs on EVERY run so the tracker keeps growing beyond the fixed pages.
+    # the web (Google + Techmeme) for NEW events not already tracked:
+    #   - conferences with an open CFP
+    #   - conferences coming up soon with tickets on sale
+    #   - meetups in the five focus cities (incl. SF demo-suitable)
+    # Runs EVERY run so the tracker keeps growing, targeting >= 5 new events.
     if RUN_DISCOVERY and SPREADSHEET_ID:
         try:
-            # Gather names already in Conferences + Time Passed to avoid rediscovering them
+            # Gather names across ALL tabs so we never rediscover existing events
             known_names: set[str] = set()
-            for tab in (CONFERENCES_SHEET, TIME_PASSED_SHEET):
+            for tab in (CONFERENCES_SHEET, TIME_PASSED_SHEET, MEETUPS_SHEET, SF_DEMOS_SHEET):
                 try:
                     c = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=tab)
                     names, _ = c.get_existing_names_and_urls()
                     known_names |= names
                 except Exception:
                     pass
-            discovered = discover_conferences(known_names=known_names)
+            discovered = discover_events(known_names=known_names)
             if discovered:
-                logger.info(f"Discovery added {len(discovered)} new candidate conferences to the pipeline")
+                logger.info(f"Discovery added {len(discovered)} new candidate events to the pipeline")
                 all_raw = all_raw + discovered
         except Exception as e:
-            logger.warning(f"Conference discovery step failed — continuing without it: {e}")
+            logger.warning(f"Event discovery step failed — continuing without it: {e}")
     elif not RUN_DISCOVERY:
-        logger.info("Conference discovery disabled (RUN_DISCOVERY=false).")
+        logger.info("Event discovery disabled (RUN_DISCOVERY=false).")
 
     logger.info(f"Total raw events collected: {len(all_raw)}")
 
@@ -461,9 +484,20 @@ def run() -> None:
         f"Time Passed +{added_tp}/~{updated_tp}  (+added / ~updated)"
     )
 
-    if total_added == 0 and total_updated == 0:
-        logger.info(
-            "No changes this run — every event found is already in the sheet and up to date."
+    # New events added to the growing lists (conferences + meetups + SF demos,
+    # excluding Time Passed archival moves)
+    new_events_added = added_conf + added_meetups + added_sf_demos
+    if new_events_added >= 5:
+        logger.info(f"Added {new_events_added} new events this run (target met).")
+    elif new_events_added > 0:
+        logger.warning(
+            f"Only {new_events_added} new events added this run (target was 5). "
+            f"Discovery found fewer genuinely-new relevant events; will try again next run."
+        )
+    else:
+        logger.warning(
+            "No NEW events added this run. Discovery found nothing new beyond what's "
+            "already tracked. Existing rows may still have been updated above."
         )
 
     # ── Step 9: Refresh CFP status on conferences already in the sheet ────────
