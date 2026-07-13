@@ -67,6 +67,17 @@ logging.basicConfig(
 logger = logging.getLogger("unikraft-event-agent")
 
 # ── Config ────────────────────────────────────────────────────────────────────
+def _flag(name: str, default: bool = True) -> bool:
+    """
+    Read a boolean-ish env var. Accepts yes/no, true/false, 1/0, on/off.
+    Empty / unset falls back to `default`.
+    """
+    val = os.environ.get(name, "").strip().lower()
+    if val == "":
+        return default
+    return val in ("yes", "true", "1", "on", "y")
+
+
 SPREADSHEET_ID    = os.environ.get("GOOGLE_SPREADSHEET_ID", "")
 CONFERENCES_SHEET = os.environ.get("CONFERENCES_SHEET", "Conferences")
 MEETUPS_SHEET     = os.environ.get("MEETUPS_SHEET", "Meet-ups")
@@ -74,20 +85,26 @@ EXCLUDED_SHEET    = os.environ.get("EXCLUDED_SHEET", "Excluded")
 TIME_PASSED_SHEET = os.environ.get("TIME_PASSED_SHEET", "Time Passed")
 SF_DEMOS_SHEET    = os.environ.get("SF_DEMOS_SHEET", "SF Product Demos")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
-DRY_RUN           = os.environ.get("DRY_RUN", "false").lower() == "true"
+DRY_RUN           = _flag("DRY_RUN", default=False)
+
+# ── Category toggles (choose per run; all default to yes) ─────────────────────
+INCLUDE_CONFERENCES = _flag("INCLUDE_CONFERENCES", default=True)
+INCLUDE_CFP         = _flag("INCLUDE_CFP", default=True)
+INCLUDE_MEETUPS     = _flag("INCLUDE_MEETUPS", default=True)
+INCLUDE_DEMOS       = _flag("INCLUDE_DEMOS", default=True)
 
 # ── Web-search throttling (cost control) ──────────────────────────────────────
-# Conference DISCOVERY runs EVERY run so new events surface each time — this is
-# what keeps the tracker growing beyond the fixed scraper pages.
+# Discovery runs EVERY run so new events surface each time — this is what keeps
+# the tracker growing beyond the fixed scraper pages.
 #
 # The two heavier, repeat-cost web-search steps stay throttled off the calendar:
 #   - Next-edition search : first weekly run of each month
 #   - CFP web search       : every other week (odd ISO weeks)
-# Set FORCE_WEB_SEARCH=true (e.g. via manual workflow_dispatch) to force those now.
-# Set RUN_DISCOVERY=false to disable discovery (e.g. to cut cost temporarily).
-FORCE_WEB_SEARCH  = os.environ.get("FORCE_WEB_SEARCH", "false").lower() == "true"
-REFRESH_CFP       = os.environ.get("REFRESH_CFP", "true").lower() == "true"
-RUN_DISCOVERY     = os.environ.get("RUN_DISCOVERY", "true").lower() == "true"
+# Set FORCE_WEB_SEARCH=yes (e.g. via manual workflow_dispatch) to force those now.
+FORCE_WEB_SEARCH  = _flag("FORCE_WEB_SEARCH", default=False)
+REFRESH_CFP       = _flag("REFRESH_CFP", default=True)
+# Discovery runs if any of the discovery categories are enabled
+RUN_DISCOVERY     = INCLUDE_CONFERENCES or INCLUDE_CFP or INCLUDE_MEETUPS
 
 # Resolve throttle decisions once at startup
 RUN_NEXT_EDITION  = FORCE_WEB_SEARCH or is_first_run_of_month()
@@ -148,8 +165,14 @@ def run() -> None:
     logger.info("Unikraft Event Scout — starting weekly run")
     logger.info(f"Timestamp        : {datetime.now(timezone.utc).isoformat()}")
     logger.info(f"Dry run          : {DRY_RUN}")
-    logger.info(f"Conference discovery this run: {RUN_DISCOVERY} "
-                f"({'every run' if RUN_DISCOVERY else 'disabled'})")
+    logger.info(
+        f"Categories       : conferences={'yes' if INCLUDE_CONFERENCES else 'no'}, "
+        f"cfp={'yes' if INCLUDE_CFP else 'no'}, "
+        f"meetups={'yes' if INCLUDE_MEETUPS else 'no'}, "
+        f"demos={'yes' if INCLUDE_DEMOS else 'no'}"
+    )
+    logger.info(f"Discovery this run           : {RUN_DISCOVERY} "
+                f"({'enabled' if RUN_DISCOVERY else 'all discovery categories off'})")
     logger.info(f"Next-edition search this run : {RUN_NEXT_EDITION} "
                 f"({'forced' if FORCE_WEB_SEARCH else 'first run of month' if RUN_NEXT_EDITION else 'throttled — skipped'})")
     logger.info(f"CFP web search this run      : {RUN_CFP_SEARCH} "
@@ -296,14 +319,19 @@ def run() -> None:
                     known_names |= names
                 except Exception:
                     pass
-            discovered = discover_events(known_names=known_names)
+            discovered = discover_events(
+                known_names=known_names,
+                include_conferences=INCLUDE_CONFERENCES,
+                include_cfp=INCLUDE_CFP,
+                include_meetups=INCLUDE_MEETUPS,
+            )
             if discovered:
                 logger.info(f"Discovery added {len(discovered)} new candidate events to the pipeline")
                 all_raw = all_raw + discovered
         except Exception as e:
             logger.warning(f"Event discovery step failed — continuing without it: {e}")
     elif not RUN_DISCOVERY:
-        logger.info("Event discovery disabled (RUN_DISCOVERY=false).")
+        logger.info("Event discovery disabled (all discovery categories set to no).")
 
     logger.info(f"Total raw events collected: {len(all_raw)}")
 
@@ -375,11 +403,22 @@ def run() -> None:
         f"{len(past_conferences)} past conferences → Time Passed"
     )
 
-    # ── Step 4b: Select meetups (focus cities, weekly cap, SF demo split) ──────
-    # Narrows the full meetup list to San Francisco / Berlin / Munich only,
-    # keeps the top 1-2 per city per event-week by fit score, and splits out
-    # SF demo-suitable events into their own bucket.
-    general_meetups, sf_demo_meetups = select_meetups(future_meetups)
+    # ── Step 4b: Select meetups (focus cities, SF demo split) ──────────────────
+    # Filters meetups to the five focus cities and splits SF demo-suitable events
+    # into their own bucket. Honours the per-category toggles.
+    if INCLUDE_MEETUPS:
+        general_meetups, sf_demo_meetups = select_meetups(future_meetups)
+    else:
+        logger.info("Meetups disabled this run — skipping meetup selection.")
+        general_meetups, sf_demo_meetups = [], []
+
+    # If demos are disabled, fold any SF-demo events back into general meetups
+    # (only if meetups themselves are enabled), otherwise drop them.
+    if not INCLUDE_DEMOS:
+        if INCLUDE_MEETUPS and sf_demo_meetups:
+            logger.info(f"Demos disabled — moving {len(sf_demo_meetups)} SF demo events into Meet-ups instead.")
+            general_meetups += sf_demo_meetups
+        sf_demo_meetups = []
 
     # ── Step 5: Check Time Passed tab for next editions ───────────────────────
     time_passed_events: list[dict] = []
@@ -415,9 +454,11 @@ def run() -> None:
     # so their CFP Date / CFP Status columns are accurate at write time.
     # Throttled to the CFP cadence to control cost.
     conferences_to_enrich = future_conferences + next_edition_conferences
-    if conferences_to_enrich and RUN_CFP_SEARCH:
+    if conferences_to_enrich and INCLUDE_CFP and RUN_CFP_SEARCH:
         logger.info(f"Looking up live CFP status for {len(conferences_to_enrich)} new conferences...")
         enrich_with_cfp(conferences_to_enrich)
+    elif conferences_to_enrich and not INCLUDE_CFP:
+        logger.info("CFP category disabled this run — skipping CFP enrichment.")
     elif conferences_to_enrich:
         logger.info(
             f"Skipping CFP lookup for {len(conferences_to_enrich)} new conferences this run "
@@ -504,7 +545,7 @@ def run() -> None:
     # Re-reads the Conferences tab and does a live CFP web search for any row
     # whose CFP Status is blank, "Check site", or "Not yet announced". This keeps
     # CFP info current as deadlines open and close over time.
-    if REFRESH_CFP and RUN_CFP_SEARCH:
+    if REFRESH_CFP and RUN_CFP_SEARCH and INCLUDE_CFP:
         try:
             refresh_client = SheetsClient(spreadsheet_id=SPREADSHEET_ID, sheet_name=CONFERENCES_SHEET)
             existing_rows = refresh_client.get_all_rows_with_index()
@@ -535,6 +576,8 @@ def run() -> None:
             logger.info(f"CFP refresh: updated {refreshed} conference rows")
         except Exception as e:
             logger.warning(f"CFP refresh step failed — continuing: {e}")
+    elif REFRESH_CFP and not INCLUDE_CFP:
+        logger.info("CFP category disabled this run — skipping CFP refresh.")
     elif REFRESH_CFP:
         logger.info("Skipping CFP refresh this run (throttled — runs on odd weeks).")
 

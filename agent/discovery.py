@@ -206,10 +206,20 @@ def _run_search(prompt: str, source_label: str, known_names: set[str],
     return out
 
 
-def discover_events(known_names: Optional[set[str]] = None) -> list[dict]:
+def discover_events(
+    known_names: Optional[set[str]] = None,
+    include_conferences: bool = True,
+    include_cfp: bool = True,
+    include_meetups: bool = True,
+) -> list[dict]:
     """
-    Run all discovery searches (CFP-open conferences, ticketed conferences,
-    and meetups) and return a combined list of new raw event dicts.
+    Run the enabled discovery searches and return a combined list of new raw
+    event dicts.
+
+    Category flags (each defaults to True):
+      include_conferences : ticketed / upcoming conference search
+      include_cfp         : conferences whose Call for Papers is still open
+      include_meetups     : meetups across the focus cities
 
     Tries to surface at least MIN_NEW_EVENTS_PER_RUN brand-new events; if the
     first pass falls short, it runs one broader retry. If still short, it returns
@@ -220,31 +230,39 @@ def discover_events(known_names: Optional[set[str]] = None) -> list[dict]:
     seen: set[str] = set()
     found: list[dict] = []
 
-    logger.info("Event discovery: searching web (Google + Techmeme focus)...")
+    logger.info(
+        f"Event discovery: searching web (Google + Techmeme focus) "
+        f"[conferences={include_conferences}, cfp={include_cfp}, meetups={include_meetups}]"
+    )
 
     want = MIN_NEW_EVENTS_PER_RUN
 
     # 1. Conferences with open CFP
-    found += _run_search(
-        CFP_OPEN_PROMPT.format(unikraft=UNIKRAFT_ONE_LINER, today=today().strftime("%B %d, %Y"),
-                               known_names=known_block, want=want),
-        "CFP-open conference", known_names, seen,
-    )
+    if include_cfp:
+        found += _run_search(
+            CFP_OPEN_PROMPT.format(unikraft=UNIKRAFT_ONE_LINER, today=today().strftime("%B %d, %Y"),
+                                   known_names=known_block, want=want),
+            "CFP-open conference", known_names, seen,
+        )
     # 2. Conferences with tickets on sale
-    found += _run_search(
-        TICKETS_PROMPT.format(unikraft=UNIKRAFT_ONE_LINER, today=today().strftime("%B %d, %Y"),
-                              known_names=known_block, want=want),
-        "ticketed conference", known_names, seen,
-    )
+    if include_conferences:
+        found += _run_search(
+            TICKETS_PROMPT.format(unikraft=UNIKRAFT_ONE_LINER, today=today().strftime("%B %d, %Y"),
+                                  known_names=known_block, want=want),
+            "ticketed conference", known_names, seen,
+        )
     # 3. Meetups across the focus cities
-    found += _run_search(
-        MEETUP_PROMPT.format(unikraft=UNIKRAFT_ONE_LINER, today=today().strftime("%B %d, %Y"),
-                             cities=", ".join(MEETUP_CITIES), known_names=known_block, want=want),
-        "meetup", known_names, seen,
-    )
+    if include_meetups:
+        found += _run_search(
+            MEETUP_PROMPT.format(unikraft=UNIKRAFT_ONE_LINER, today=today().strftime("%B %d, %Y"),
+                                 cities=", ".join(MEETUP_CITIES), known_names=known_block, want=want),
+            "meetup", known_names, seen,
+        )
 
-    # Ensure we tried hard to reach the minimum — one broader retry if short
-    if len(found) < MIN_NEW_EVENTS_PER_RUN:
+    # Ensure we tried hard to reach the minimum — one broader retry if short.
+    # Only retry if at least one category is enabled (otherwise there's nothing to find).
+    any_enabled = include_conferences or include_cfp or include_meetups
+    if any_enabled and len(found) < MIN_NEW_EVENTS_PER_RUN:
         logger.info(
             f"Only {len(found)} new events so far (< {MIN_NEW_EVENTS_PER_RUN}); "
             f"running one broader retry search..."
