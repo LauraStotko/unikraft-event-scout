@@ -11,7 +11,7 @@ in the sheet — so the tracker keeps growing.
 It runs three kinds of search:
   1. Conferences with an OPEN Call for Papers (we can still submit a talk)
   2. Conferences coming up SOON where tickets are still on sale (we can attend)
-  3. Meetups in SF / Munich / Berlin / Bucharest / London with a DevOps,
+  3. Meetups in SF / Munich / Berlin / Bucharest / London / Dublin with a DevOps,
      developer, or agentic-AI audience — including SF events good for a demo.
 
 All output is returned as raw event dicts in the same shape the scrapers produce,
@@ -36,7 +36,7 @@ UNIKRAFT_ONE_LINER = (
     "use cases: AI agents, serverless databases, headless browsers, FaaS, build pipelines)."
 )
 
-MEETUP_CITIES = ["San Francisco", "Munich", "Berlin", "Bucharest", "London"]
+MEETUP_CITIES = ["San Francisco", "Munich", "Berlin", "Bucharest", "London", "Dublin"]
 
 
 # ── Conference search: CFP still open ─────────────────────────────────────────

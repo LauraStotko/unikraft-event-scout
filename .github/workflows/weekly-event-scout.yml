@@ -26,7 +26,7 @@ on:
           - "yes"
           - "no"
       include_meetups:
-        description: "Include meetups (SF/Munich/Berlin/Bucharest/London)?"
+        description: "Include meetups (SF/Munich/Berlin/Bucharest/London/Dublin)?"
         required: false
         default: "yes"
         type: choice

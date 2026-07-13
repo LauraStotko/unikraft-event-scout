@@ -4,8 +4,8 @@ agent/meetup_selector.py
 Turns the full list of classified meetups into the buckets that get written.
 
 Rules:
-  - Keep meetups in the five focus cities: San Francisco, Munich, Berlin,
-    Bucharest, London. Meetups elsewhere are dropped.
+  - Keep meetups in the six focus cities: San Francisco, Munich, Berlin,
+    Bucharest, London, Dublin. Meetups elsewhere are dropped.
   - No per-week cap — the priority is to keep growing the list. Weak meetups
     (fit_score below the minimum) are still dropped for quality.
   - San Francisco meetups suitable for a live product demo are routed to a
@@ -26,6 +26,7 @@ FOCUS_CITIES = {
     "Berlin": ["berlin"],
     "Bucharest": ["bucharest", "bucurești", "bucuresti"],
     "London": ["london"],
+    "Dublin": ["dublin"],
 }
 
 MIN_FIT_SCORE = 50  # drop weak meetups entirely
