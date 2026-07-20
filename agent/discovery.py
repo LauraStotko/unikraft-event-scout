@@ -164,11 +164,25 @@ def _known_names_block(known_names: set[str]) -> str:
     return lines
 
 
+JSON_ONLY_SUFFIX = """
+
+IMPORTANT OUTPUT RULES:
+- Do all your web searching first, then give your final answer.
+- Your final answer must be ONLY the JSON object — no preamble, no explanation,
+  no markdown code fences, nothing before or after it.
+- Keep "why_relevant" to a very short phrase (max 8 words) to save space.
+- If you find nothing, output {"events": []}."""
+
+
 def _run_search(prompt: str, source_label: str, known_names: set[str],
                 seen: set[str], extra: Optional[dict] = None,
-                max_searches: int = 3) -> list[dict]:
+                max_searches: int = 6) -> list[dict]:
     """Run one web search, parse the 'events' array into raw event dicts."""
-    result = search_and_extract(prompt, max_searches=max_searches, max_tokens=2000)
+    result = search_and_extract(
+        prompt + JSON_ONLY_SUFFIX,
+        max_searches=max_searches,
+        max_tokens=4096,
+    )
     if not result or "events" not in result:
         logger.info(f"  [{source_label}] no results")
         return []
@@ -276,7 +290,7 @@ def discover_events(
             f"Return EXACTLY ONE JSON object: "
             f'{{"events":[{{"name":"","location":"","start_date":"","end_date":"","website":"","why_relevant":""}}]}}'
         )
-        found += _run_search(broad, "broad retry", known_names, seen, max_searches=4)
+        found += _run_search(broad, "broad retry", known_names, seen, max_searches=6)
 
     if len(found) < MIN_NEW_EVENTS_PER_RUN:
         logger.warning(

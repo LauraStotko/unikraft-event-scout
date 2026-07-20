@@ -25,8 +25,11 @@ logger = logging.getLogger(__name__)
 
 _client: Optional[anthropic.Anthropic] = None
 
-# Cap searches per request to control cost/latency
-DEFAULT_MAX_USES = 4
+# Generous defaults so Claude can finish searching AND emit the full JSON.
+# Truncation (max_tokens cutoff) and search-budget exhaustion were the two main
+# causes of "Could not extract JSON" failures, so both are raised here.
+DEFAULT_MAX_USES = 6
+DEFAULT_MAX_TOKENS = 4096
 
 
 def _get_client() -> anthropic.Anthropic:
@@ -39,61 +42,126 @@ def _get_client() -> anthropic.Anthropic:
     return _client
 
 
+def _closers_for(fragment: str) -> str:
+    """
+    Return the correct sequence of closing brackets for `fragment`, respecting
+    nesting order (innermost first). Ignores brackets inside strings.
+    """
+    stack = []
+    in_str = False
+    escape = False
+    for ch in fragment:
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch in "{[":
+            stack.append(ch)
+        elif ch == "}" and stack and stack[-1] == "{":
+            stack.pop()
+        elif ch == "]" and stack and stack[-1] == "[":
+            stack.pop()
+    return "".join("}" if c == "{" else "]" for c in reversed(stack))
+
+
+def _close_and_load(fragment: str) -> Optional[dict]:
+    """Balance any open strings/brackets on `fragment` and try to json.loads it."""
+    frag = fragment.rstrip().rstrip(",")
+    # If inside an unterminated string, cut back to before it opened
+    if frag.count('"') % 2 == 1:
+        frag = frag[:frag.rfind('"')].rstrip().rstrip(",")
+    # A trailing "key": with no value — drop the dangling key
+    frag = re.sub(r',?\s*"[^"]*"\s*:\s*$', "", frag).rstrip().rstrip(",")
+    repaired = frag + _closers_for(frag)
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        return None
+
+
+def _repair_truncated_json(candidate: str) -> Optional[dict]:
+    """
+    Parse JSON cut off mid-output (max_tokens hit). Progressively drops the
+    trailing incomplete portion — first the dangling field, then whole elements
+    from the end — closing brackets each time until it parses.
+    """
+    s = candidate.strip()
+
+    # First attempt: just balance/close what we have (drops a dangling field)
+    result = _close_and_load(s)
+    if result is not None:
+        return result
+
+    # Otherwise drop trailing elements one comma at a time and retry
+    work = s
+    for _ in range(200):
+        cut = work.rfind(",")
+        if cut == -1:
+            break
+        work = work[:cut]
+        result = _close_and_load(work)
+        if result is not None:
+            return result
+    return None
+
+
 def _extract_json(text: str) -> Optional[dict]:
     """
-    Extract the first JSON object from a block of text.
-    Handles markdown code fences and surrounding prose.
+    Extract a JSON object from a block of text, robust to:
+      - markdown ```json fences (including ones with no closing fence)
+      - surrounding prose before/after the JSON
+      - JSON truncated mid-output by a token limit
     """
     if not text:
         return None
 
-    # Strip code fences
     cleaned = text.strip()
+
+    # If there's a ```json fence, take everything after the LAST one — that's
+    # almost always where the final answer lives.
     if "```" in cleaned:
-        # Grab content between the first pair of fences
-        parts = cleaned.split("```")
-        for part in parts:
-            p = part.strip()
-            if p.startswith("json"):
-                p = p[4:].strip()
-            if p.startswith("{"):
-                cleaned = p
-                break
+        # Prefer content following a ```json marker
+        m = re.split(r"```(?:json)?", cleaned)
+        # Pick the longest fragment that looks like it contains an object
+        candidates = [frag for frag in m if "{" in frag]
+        if candidates:
+            cleaned = max(candidates, key=len).strip()
 
-    # Find the outermost JSON object
     start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start == -1 or end == -1 or end < start:
+    if start == -1:
         return None
+    cleaned = cleaned[start:]
 
-    candidate = cleaned[start:end + 1]
-    try:
-        return json.loads(candidate)
-    except json.JSONDecodeError:
-        # Last resort: try a non-greedy regex for a simple object
-        match = re.search(r"\{.*\}", candidate, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except json.JSONDecodeError:
-                return None
-    return None
+    # First try: well-formed object (find the matching outer brace)
+    end = cleaned.rfind("}")
+    if end != -1:
+        try:
+            return json.loads(cleaned[:end + 1])
+        except json.JSONDecodeError:
+            pass
+
+    # Second try: repair a truncated / unbalanced object
+    return _repair_truncated_json(cleaned)
 
 
 def search_and_extract(
     prompt: str,
     max_searches: int = DEFAULT_MAX_USES,
-    max_tokens: int = 1024,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
     model: str = "claude-sonnet-4-5",
 ) -> Optional[dict]:
     """
     Run Claude with the web_search tool against `prompt`, then extract and
     return the JSON object from its final response.
 
-    The prompt MUST instruct Claude to:
-      1. Search the web thoroughly
-      2. End its reply with a single JSON object matching a described schema
-
+    The prompt MUST instruct Claude to output a single JSON object.
     Returns the parsed dict, or None on failure.
     """
     client = _get_client()
@@ -115,7 +183,10 @@ def search_and_extract(
         logger.error(f"Web search API error: {e}")
         return None
 
-    # The final answer is the concatenation of all text blocks in the response
+    # Warn if the model was cut off — helps diagnose future issues
+    if getattr(message, "stop_reason", None) == "max_tokens":
+        logger.warning("Web search response hit max_tokens; attempting to salvage partial JSON.")
+
     text_parts = []
     for block in message.content:
         if getattr(block, "type", None) == "text":
