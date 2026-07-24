@@ -39,7 +39,7 @@ try:
 except ImportError:
     pass
 
-from scrapers import scrape_luma, scrape_techmeme, scrape_cncf
+from scrapers import scrape_luma, scrape_techmeme, scrape_cncf, scrape_meetup_sources
 from agent import (
     classify_batch,
     check_all_next_editions,
@@ -125,17 +125,33 @@ def _scrape_and_discover(
     include_cfp: bool = True,
     include_meetups: bool = True,
 ) -> list[dict]:
-    """Run all scrapers + web discovery, return the combined raw event list."""
-    logger.info("Scraping Luma...")
-    luma = scrape_luma()
+    """Run all scrapers + web discovery, return the combined raw event list.
 
-    logger.info("Scraping Techmeme...")
-    tmeme = scrape_techmeme()
+    In meetup-only mode (include_meetups=True, conferences=False):
+      - Luma is SKIPPED (Laura adds those manually)
+      - Meetup.com + Conferenceparties.com are added instead
+      - Techmeme and CNCF are also skipped (conference-focused sources)
 
-    logger.info("Fetching CNCF / Linux Foundation events...")
-    cncf = scrape_cncf()
+    In conference mode:
+      - Luma is skipped (no Luma in conference pipeline)
+      - Techmeme + CNCF run as normal
+    """
+    meetup_only = include_meetups and not include_conferences and not include_cfp
+    all_raw: list[dict] = []
 
-    all_raw = luma + tmeme + cncf
+    if meetup_only:
+        # Meetup agent: use dedicated meetup scrapers, not Luma/Techmeme/CNCF
+        logger.info("Scraping Meetup.com groups...")
+        logger.info("Scraping Conferenceparties.com...")
+        all_raw += scrape_meetup_sources()
+    else:
+        # Conference agent: Techmeme + CNCF (no Luma)
+        logger.info("Scraping Techmeme...")
+        all_raw += scrape_techmeme()
+
+        logger.info("Fetching CNCF / Linux Foundation events...")
+        all_raw += scrape_cncf()
+
     logger.info(f"Total events from scrapers: {len(all_raw)}")
 
     # Web discovery — gated per category so each agent only runs relevant searches
@@ -461,10 +477,11 @@ def run_meetups() -> None:
     total_added = added_meetups + added_sf
     logger.info(f"Done. Meet-ups +{added_meetups}/~{updated_meetups} | SF Demos +{added_sf}/~{updated_sf}")
 
-    if total_added >= 5:
+    if total_added >= 15:
         logger.info(f"Added {total_added} new meetups this run (target met).")
     elif total_added > 0:
-        logger.warning(f"Only {total_added} new meetups added (target was 5).")
+        logger.warning(f"Only {total_added} new meetups added (target was 15). "
+                       f"Will search more sources next run.")
     else:
         logger.warning("No new meetups added this run.")
 

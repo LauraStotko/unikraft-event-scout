@@ -27,8 +27,12 @@ from .dates import today
 
 logger = logging.getLogger(__name__)
 
-# Minimum brand-new events we try to add each run.
+# Minimum brand-new events the conference agent tries to add each run.
 MIN_NEW_EVENTS_PER_RUN = 5
+
+# Minimum brand-new meetups the meetup agent aims for each run.
+# Set higher because we want a long, comprehensive list.
+MIN_NEW_MEETUPS_PER_RUN = 15
 
 UNIKRAFT_ONE_LINER = (
     "Unikraft Cloud is a next-generation cloud infrastructure company "
@@ -118,22 +122,37 @@ MEETUP_PROMPT = """You are scouting local tech MEETUPS for Unikraft Cloud.
 
 Today's date is: {today}
 
-TASK: Use web search (prioritise Google and Techmeme) to find UPCOMING meetups in these cities:
-{cities}.
+TASK: Search the web THOROUGHLY to build a LONG, COMPREHENSIVE list of UPCOMING meetups
+in these cities: {cities}.
 
-Only include meetups whose audience is primarily DevOps engineers, software developers, or
-agentic-AI / AI developers — people who could be Unikraft Cloud users or customers. Skip purely
-social, non-technical, or beginner networking events.
+The goal is to find as many relevant meetups as possible — aim for at least {want}.
+Cast a wide net. Search across ALL of the following sources:
 
-Also identify, for San Francisco only, meetups whose format would let us give a live PRODUCT DEMO
-(demo nights, show-and-tell, startup showcases, hackathons) — mark those with "demo_suitable": true.
+1. meetup.com — search for tech groups in each city (DevOps, Kubernetes, cloud-native,
+   AI/ML, platform engineering, infrastructure, agentic AI)
+2. Bond AI community (bondai.io or similar) — AI developer events
+3. FOMO communities (e.g. fomo.berlin, fomo.sf) — curated local tech event lists
+4. conferenceparties.com — side events and community meetups running alongside major conferences
+5. Google search — queries like "DevOps meetup {city} 2026", "AI developer meetup {city}",
+   "Kubernetes meetup {city}", "cloud native {city} event", "tech hackathon {city}"
+6. Eventbrite — search for tech meetups in each city
+7. Heavybit community events (heavybit.com/library/events) — developer tool focused events
+
+Only include meetups whose audience is primarily DevOps engineers, software developers,
+agentic-AI / AI developers, platform engineers, or technical founders — people who could
+be Unikraft Cloud users or customers. Skip purely social, non-technical, or beginner events.
+
+Also identify, for San Francisco only, meetups whose format would let us give a live PRODUCT
+DEMO (demo nights, show-and-tell, startup showcases, hackathons, lightning talks) — mark
+those with "demo_suitable": true.
 
 Events must start AFTER today ({today}).
 
 Do NOT include these already-tracked events:
 {known_names}
 
-Find at least {want} good ones across the cities.
+Dig deep — search each city, try multiple queries per city, check multiple sources.
+The more you find the better.
 
 End your reply with EXACTLY ONE JSON object (no other text after it):
 {{
@@ -249,34 +268,38 @@ def discover_events(
         f"[conferences={include_conferences}, cfp={include_cfp}, meetups={include_meetups}]"
     )
 
-    want = MIN_NEW_EVENTS_PER_RUN
+    # Use higher target when searching meetups only (meetup agent wants a long list)
+    meetup_only = include_meetups and not include_conferences and not include_cfp
+    want = MIN_NEW_MEETUPS_PER_RUN if meetup_only else MIN_NEW_EVENTS_PER_RUN
+    min_target = want
 
     # 1. Conferences with open CFP
     if include_cfp:
         found += _run_search(
             CFP_OPEN_PROMPT.format(unikraft=UNIKRAFT_ONE_LINER, today=today().strftime("%B %d, %Y"),
-                                   known_names=known_block, want=want),
+                                   known_names=known_block, want=MIN_NEW_EVENTS_PER_RUN),
             "CFP-open conference", known_names, seen,
         )
     # 2. Conferences with tickets on sale
     if include_conferences:
         found += _run_search(
             TICKETS_PROMPT.format(unikraft=UNIKRAFT_ONE_LINER, today=today().strftime("%B %d, %Y"),
-                                  known_names=known_block, want=want),
+                                  known_names=known_block, want=MIN_NEW_EVENTS_PER_RUN),
             "ticketed conference", known_names, seen,
         )
-    # 3. Meetups across the focus cities
+    # 3. Meetups across the focus cities — uses full source list and high target
     if include_meetups:
         found += _run_search(
             MEETUP_PROMPT.format(unikraft=UNIKRAFT_ONE_LINER, today=today().strftime("%B %d, %Y"),
                                  cities=", ".join(MEETUP_CITIES), known_names=known_block, want=want),
             "meetup", known_names, seen,
+            max_searches=8,   # more searches for the comprehensive meetup scan
         )
 
     # Ensure we tried hard to reach the minimum — one broader retry if short.
     # Only retry if at least one category is enabled (otherwise there's nothing to find).
     any_enabled = include_conferences or include_cfp or include_meetups
-    if any_enabled and len(found) < MIN_NEW_EVENTS_PER_RUN:
+    if any_enabled and len(found) < min_target:
         logger.info(
             f"Only {len(found)} new events so far (< {MIN_NEW_EVENTS_PER_RUN}); "
             f"running one broader retry search..."
@@ -292,10 +315,10 @@ def discover_events(
         )
         found += _run_search(broad, "broad retry", known_names, seen, max_searches=6)
 
-    if len(found) < MIN_NEW_EVENTS_PER_RUN:
+    if len(found) < min_target:
         logger.warning(
             f"Discovery found only {len(found)} new events this run "
-            f"(target was {MIN_NEW_EVENTS_PER_RUN}). Adding what was found without padding."
+            f"(target was {min_target}). Adding what was found without padding."
         )
 
     logger.info(f"Event discovery complete: {len(found)} new candidates found")
