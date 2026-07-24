@@ -116,59 +116,65 @@ End your reply with EXACTLY ONE JSON object (no other text after it):
 Only include events you found real evidence for (dates + open registration)."""
 
 
-# ── Meetup search ─────────────────────────────────────────────────────────────
-MEETUP_PROMPT = """You are scouting local tech MEETUPS for Unikraft Cloud.
+# ── Meetup search — one prompt per city for maximum depth ─────────────────────
+# Running one search per city (rather than one search for all cities) lets Claude
+# dig much deeper into each city's event landscape before hitting its search budget.
+MEETUP_CITY_PROMPT = """You are scouting local tech MEETUPS in {city} for Unikraft Cloud.
 {unikraft}
 
 Today's date is: {today}
 
-TASK: Search the web THOROUGHLY to build a LONG, COMPREHENSIVE list of UPCOMING meetups
-in these cities: {cities}.
+TASK: Search the web EXHAUSTIVELY to find as many UPCOMING tech meetups in {city} as possible.
+Aim for at least {want} events. Cast a very wide net.
 
-The goal is to find as many relevant meetups as possible — aim for at least {want}.
-Cast a wide net. Search across ALL of the following sources:
+Search these sources thoroughly:
+1. meetup.com — search "DevOps {city}", "Kubernetes {city}", "AI {city}", "cloud native {city}",
+   "platform engineering {city}", "agentic AI {city}", "infrastructure {city}", "LLM {city}",
+   "serverless {city}", "developer {city}", "SRE {city}", "startup {city}", "hackathon {city}"
+2. Google — try queries like: "{city} tech meetup 2026", "{city} AI developer event",
+   "{city} DevOps meetup", "{city} cloud native", "{city} engineering community event",
+   "site:lu.ma {city}", "site:eventbrite.com {city} tech"
+3. Bond AI community (bondai.io) — AI developer events in or near {city}
+4. FOMO community lists (search "FOMO {city}" or "fomo.{city_lower}") — curated local tech events
+5. Eventbrite — search tech meetups in {city}
 
-1. meetup.com — search for tech groups in each city (DevOps, Kubernetes, cloud-native,
-   AI/ML, platform engineering, infrastructure, agentic AI)
-2. Bond AI community (bondai.io or similar) — AI developer events
-3. FOMO communities (e.g. fomo.berlin, fomo.sf) — curated local tech event lists
-4. conferenceparties.com — side events and community meetups running alongside major conferences
-5. Google search — queries like "DevOps meetup {city} 2026", "AI developer meetup {city}",
-   "Kubernetes meetup {city}", "cloud native {city} event", "tech hackathon {city}"
-6. Eventbrite — search for tech meetups in each city
-7. Heavybit community events (heavybit.com/library/events) — developer tool focused events
+INCLUSION CRITERIA — be INCLUSIVE, not restrictive. Include:
+- DevOps, platform engineering, SRE, cloud infrastructure events
+- Kubernetes, containers, cloud-native, serverless
+- AI agents, LLMs, MLOps, agentic AI, coding agents, AI infrastructure
+- Build AI agents / AI developer workshops — these ARE relevant
+- General tech startup community events where founders and engineers are present
+- Hackathons, demo nights, show-and-tell events, tech talks
+- Any event where engineers who build or deploy software will be present
 
-Only include meetups whose audience is primarily DevOps engineers, software developers,
-agentic-AI / AI developers, platform engineers, or technical founders — people who could
-be Unikraft Cloud users or customers. Skip purely social, non-technical, or beginner events.
-
-Also identify, for San Francisco only, meetups whose format would let us give a live PRODUCT
-DEMO (demo nights, show-and-tell, startup showcases, hackathons, lightning talks) — mark
-those with "demo_suitable": true.
+Only exclude purely social events (no tech content), non-technical business events,
+and consumer-facing events (e.g. health, fashion, retail).{sf_demo_note}
 
 Events must start AFTER today ({today}).
 
 Do NOT include these already-tracked events:
 {known_names}
 
-Dig deep — search each city, try multiple queries per city, check multiple sources.
-The more you find the better.
-
-End your reply with EXACTLY ONE JSON object (no other text after it):
+Return ONLY a JSON object:
 {{
   "events": [
     {{
       "name": "Meetup name",
-      "location": "City, Country",
+      "location": "{city}",
       "start_date": "MMM DD, YYYY",
       "end_date": "MMM DD, YYYY or empty string",
       "website": "URL",
       "demo_suitable": true or false,
-      "why_relevant": "one short phrase on audience / topic fit"
+      "why_relevant": "audience or topic in 6 words max"
     }}
   ]
-}}
-Only include meetups you found real evidence for."""
+}}"""
+
+SF_DEMO_NOTE = """
+
+For San Francisco: also flag meetups where Unikraft could give a live PRODUCT DEMO
+(demo nights, show-and-tell, startup showcases, hackathons, lightning talks) by setting
+"demo_suitable": true. For all other cities always set "demo_suitable": false."""
 
 
 def _known_names_block(known_names: set[str]) -> str:
@@ -270,8 +276,8 @@ def discover_events(
 
     # Use higher target when searching meetups only (meetup agent wants a long list)
     meetup_only = include_meetups and not include_conferences and not include_cfp
-    want = MIN_NEW_MEETUPS_PER_RUN if meetup_only else MIN_NEW_EVENTS_PER_RUN
-    min_target = want
+    want_per_city = max(3, MIN_NEW_MEETUPS_PER_RUN // len(MEETUP_CITIES))
+    min_target = MIN_NEW_MEETUPS_PER_RUN if meetup_only else MIN_NEW_EVENTS_PER_RUN
 
     # 1. Conferences with open CFP
     if include_cfp:
@@ -287,31 +293,50 @@ def discover_events(
                                   known_names=known_block, want=MIN_NEW_EVENTS_PER_RUN),
             "ticketed conference", known_names, seen,
         )
-    # 3. Meetups across the focus cities — uses full source list and high target
+    # 3. Meetups — ONE SEARCH PER CITY for maximum depth.
+    # Running per-city lets Claude exhaust each city's event sources before moving on,
+    # producing a much longer list than a single multi-city search.
     if include_meetups:
-        found += _run_search(
-            MEETUP_PROMPT.format(unikraft=UNIKRAFT_ONE_LINER, today=today().strftime("%B %d, %Y"),
-                                 cities=", ".join(MEETUP_CITIES), known_names=known_block, want=want),
-            "meetup", known_names, seen,
-            max_searches=8,   # more searches for the comprehensive meetup scan
-        )
+        for city in MEETUP_CITIES:
+            city_lower = city.lower().replace(" ", "")
+            sf_demo_note = SF_DEMO_NOTE if city == "San Francisco" else ""
+            prompt = MEETUP_CITY_PROMPT.format(
+                unikraft=UNIKRAFT_ONE_LINER,
+                today=today().strftime("%B %d, %Y"),
+                city=city,
+                city_lower=city_lower,
+                known_names=known_block,
+                want=want_per_city,
+                sf_demo_note=sf_demo_note,
+            )
+            city_results = _run_search(
+                prompt,
+                f"meetup/{city}",
+                known_names,
+                seen,
+                max_searches=6,
+            )
+            found += city_results
+            logger.info(f"  City total so far: {len(found)} meetups found")
 
     # Ensure we tried hard to reach the minimum — one broader retry if short.
     # Only retry if at least one category is enabled (otherwise there's nothing to find).
     any_enabled = include_conferences or include_cfp or include_meetups
     if any_enabled and len(found) < min_target:
         logger.info(
-            f"Only {len(found)} new events so far (< {MIN_NEW_EVENTS_PER_RUN}); "
+            f"Only {len(found)} new events so far (< {min_target}); "
             f"running one broader retry search..."
         )
+        cities_str = ", ".join(MEETUP_CITIES) if meetup_only else "any city"
         broad = (
             f"{UNIKRAFT_ONE_LINER}\nToday is {today().strftime('%B %d, %Y')}. "
-            f"Use web search (Google + Techmeme) to find ANY upcoming conferences or meetups "
-            f"(cloud-native, Kubernetes, AI infra, agentic AI, serverless, DevOps, platform "
-            f"engineering) starting after today that a cloud-infrastructure company should attend. "
-            f"Exclude these already-tracked events:\n{known_block}\n"
-            f"Return EXACTLY ONE JSON object: "
-            f'{{"events":[{{"name":"","location":"","start_date":"","end_date":"","website":"","why_relevant":""}}]}}'
+            f"Use web search to find ANY upcoming tech meetups or conferences "
+            f"({'in: ' + cities_str if meetup_only else 'globally'}) "
+            f"relevant to cloud infrastructure, AI agents, DevOps, or platform engineering, "
+            f"starting after today. Search meetup.com, eventbrite, lu.ma, and Google. "
+            f"Exclude:\n{known_block}\n"
+            f"Return ONLY this JSON: "
+            f'{{"events":[{{"name":"","location":"","start_date":"","end_date":"","website":"","demo_suitable":false,"why_relevant":""}}]}}'
         )
         found += _run_search(broad, "broad retry", known_names, seen, max_searches=6)
 

@@ -39,7 +39,7 @@ try:
 except ImportError:
     pass
 
-from scrapers import scrape_luma, scrape_techmeme, scrape_cncf, scrape_meetup_sources
+from scrapers import scrape_luma, scrape_techmeme, scrape_cncf
 from agent import (
     classify_batch,
     check_all_next_editions,
@@ -140,10 +140,9 @@ def _scrape_and_discover(
     all_raw: list[dict] = []
 
     if meetup_only:
-        # Meetup agent: use dedicated meetup scrapers, not Luma/Techmeme/CNCF
-        logger.info("Scraping Meetup.com groups...")
-        logger.info("Scraping Conferenceparties.com...")
-        all_raw += scrape_meetup_sources()
+        # Meetup agent: no fixed scrapers — discovery (web search per city) handles everything.
+        # Luma is added manually by Laura. Meetup.com/Eventbrite require JS rendering.
+        logger.info("Meetup mode: skipping fixed scrapers — web discovery covers all sources.")
     else:
         # Conference agent: Techmeme + CNCF (no Luma)
         logger.info("Scraping Techmeme...")
