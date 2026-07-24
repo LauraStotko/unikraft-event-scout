@@ -1,0 +1,66 @@
+name: Conference Scout
+
+on:
+  # Runs every Monday at 08:00 UTC
+  schedule:
+    - cron: "0 8 * * 1"
+
+  # Manual trigger with conference-specific options
+  workflow_dispatch:
+    inputs:
+      include_cfp:
+        description: "Search for conferences with an open CFP?"
+        required: false
+        default: "yes"
+        type: choice
+        options: ["yes", "no"]
+      force_web_search:
+        description: "Force next-edition + CFP refresh (ignores weekly throttle)?"
+        required: false
+        default: "no"
+        type: choice
+        options: ["no", "yes"]
+      dry_run:
+        description: "Dry run — preview only, no sheet writes?"
+        required: false
+        default: "no"
+        type: choice
+        options: ["no", "yes"]
+
+jobs:
+  conference-scout:
+    name: Find and update conferences
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Conference Scout
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          INCLUDE_CFP: ${{ github.event.inputs.include_cfp || 'yes' }}
+          FORCE_WEB_SEARCH: ${{ github.event.inputs.force_web_search || 'no' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'no' }}
+        run: python main.py --mode conference
+
+      - name: Upload run log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conference-scout-failure-log
+          path: "*.log"
+          retention-days: 7

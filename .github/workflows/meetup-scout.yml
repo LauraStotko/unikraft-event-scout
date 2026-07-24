@@ -1,0 +1,59 @@
+name: Meetup Scout
+
+on:
+  # Runs every Monday at 08:15 UTC (15 min after Conference Scout to avoid overlap)
+  schedule:
+    - cron: "15 8 * * 1"
+
+  # Manual trigger with meetup-specific options
+  workflow_dispatch:
+    inputs:
+      include_demos:
+        description: "Include SF product-demo events (→ SF Product Demos tab)?"
+        required: false
+        default: "yes"
+        type: choice
+        options: ["yes", "no"]
+      dry_run:
+        description: "Dry run — preview only, no sheet writes?"
+        required: false
+        default: "no"
+        type: choice
+        options: ["no", "yes"]
+
+jobs:
+  meetup-scout:
+    name: Find and update meetups
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Meetup Scout
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          INCLUDE_DEMOS: ${{ github.event.inputs.include_demos || 'yes' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'no' }}
+        run: python main.py --mode meetup
+
+      - name: Upload run log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meetup-scout-failure-log
+          path: "*.log"
+          retention-days: 7
