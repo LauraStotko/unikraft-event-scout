@@ -19,9 +19,17 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Focus cities and the substrings that identify them in a location string
+# Focus cities and the substrings that identify them in a location string.
+# San Francisco includes the full Bay Area — iCal events often have street
+# addresses like "Menlo Park, CA" or "Palo Alto" rather than "San Francisco".
 FOCUS_CITIES = {
-    "San Francisco": ["san francisco", "sf,", "s.f.", "bay area"],
+    "San Francisco": [
+        "san francisco", "sf,", "s.f.", "bay area",
+        "palo alto", "menlo park", "mountain view", "san jose",
+        "redwood city", "santa clara", "oakland", "berkeley",
+        "sunnyvale", "cupertino", "fremont", "san mateo",
+        ", ca ", ", ca,", "california", "94", # zip codes starting 94xxx are Bay Area
+    ],
     "Munich": ["munich", "münchen", "muenchen"],
     "Berlin": ["berlin"],
     "Bucharest": ["bucharest", "bucurești", "bucuresti"],
@@ -29,7 +37,10 @@ FOCUS_CITIES = {
     "Dublin": ["dublin"],
 }
 
-MIN_FIT_SCORE = 50  # drop weak meetups entirely
+# No minimum score — keep everything that passes the city check.
+# The fit_score is retained for informational purposes in the sheet,
+# but nothing is dropped based on it. Better to have too many than too few.
+MIN_FIT_SCORE = 0
 
 
 def _match_city(location: str) -> Optional[str]:
@@ -62,9 +73,7 @@ def select_meetups(meetups: list[dict]) -> tuple[list[dict], list[dict]]:
             continue
 
         score = int(ev.get("fit_score", 0) or 0)
-        if score and score < MIN_FIT_SCORE:
-            logger.info(f"  Meetup dropped (fit_score {score} < {MIN_FIT_SCORE}): {ev.get('name')}")
-            continue
+        # No score-based dropping — keep everything in a focus city.
 
         ev["_city"] = city
 

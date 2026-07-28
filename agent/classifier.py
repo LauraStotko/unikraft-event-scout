@@ -207,22 +207,24 @@ Your job: given a raw event scraped from the web, determine:
 2. If yes, extract the structured fields below.
 
 RELEVANCE RULES:
-- MEETUPS: only include local meetups in San Francisco, Munich, Berlin, Bucharest, London, or Dublin. Meetups in any other city are NOT relevant — mark them relevant=false. Within these six cities, be INCLUSIVE: include any meetup where engineers, developers, CTOs, or technical founders are likely to attend. This includes DevOps, cloud-native, Kubernetes, serverless, AI agents, LLMs, MLOps, agentic AI, "Build AI Agents" workshops, coding agent events, infrastructure meetups, hackathons, demo nights, startup tech events, and general developer community gatherings. Only exclude events that are clearly non-technical (purely social mixers, consumer/retail events, non-engineering business events).
+- MEETUPS: The goal is to build a LONG, COMPREHENSIVE list — default to YES unless clearly wrong.
+  Include a meetup if it is in San Francisco / Bay Area, Munich, Berlin, Bucharest, London, or Dublin AND has any tech or startup angle. Mark relevant=true for: anything with AI, LLMs, agents, DevOps, cloud, Kubernetes, infrastructure, serverless, SRE, platform engineering, coding, hackathons, demo nights, startup community events, developer happy hours, networking for founders/engineers, ML, data engineering, open source. Only mark relevant=false if it is clearly non-technical with zero engineering audience (e.g. a cooking class, yoga event, purely sales/marketing event, consumer retail event).
+  When in doubt, mark it relevant=true. It is much better to include too many than too few.
+  For location: San Francisco includes the wider Bay Area — Palo Alto, Menlo Park, Mountain View, San Jose, Redwood City, Santa Clara, Oakland, Berkeley all count as San Francisco for our purposes.
+  Meetups in ANY other city outside the six listed above: mark relevant=false.
 - Global conferences: only include if clearly relevant to cloud infrastructure, AI agents, serverless, platform engineering, or DevOps — AND if the audience includes people who make or influence infrastructure decisions.
-- Always ask: "Would a CTO or platform engineer at an AI startup attend this, and could we meet potential customers there?" If not clearly yes, mark relevant=false.
 
 EVENT TYPE:
 Classify every relevant event as either "conference" or "meetup":
 - "conference": multi-session, 1+ full days, formal programme, paid tickets, attendees travel. Examples: KubeCon, WeAreDevelopers World Congress, AI Engineer World's Fair, DevOpsDays.
-- "meetup": local, community-run, free, evening format, single venue, under ~200 people. Examples: Cloud Native Night Munich, AWS User Group, Luma community events, demo nights.
+- "meetup": local, community-run, free or low-cost, evening format, single venue. Examples: Cloud Native Night Munich, AWS User Group, Luma community events, demo nights, happy hours.
 
 MEETUP SCORING (only for meetups):
-Give each meetup a fit_score from 0-100 based on how valuable it is to attend for meeting potential Unikraft Cloud customers. Weight these factors:
-- Technical audience (engineers, CTOs, infra/platform leads, technical founders present) — most important
-- Topic match to Unikraft use cases (AI agents, serverless, cloud-native, DevOps, platform engineering, FaaS)
-- Event format quality (prefer demo nights, technical talks, hackathons, show-and-tell over social mixers)
-- Attendance / reach (prefer events with a meaningful number of registered attendees)
-A generic or weakly-relevant meetup should score below 50. Only strong, clearly-worthwhile events should score 70+.
+Give each meetup a fit_score from 0-100. This is informational only — ALL meetups passing the city check above are kept regardless of score. Score based on:
+- Technical audience quality (engineers, CTOs, infra leads — most important)
+- Topic match to Unikraft use cases (AI agents, serverless, cloud-native, DevOps, FaaS)
+- Event format (demo nights, talks, hackathons score higher than pure networking)
+Use the full range: a random startup happy hour is 30-40, a KubeCon side event is 85-95.
 
 DEMO SUITABILITY (only for San Francisco meetups):
 Set demo_suitable=true if the event format would realistically let Unikraft show a live product demo — e.g. demo nights, show-and-tell, startup showcases, hackathons, lightning-talk / demo formats. Otherwise demo_suitable=false. For non-SF meetups always set demo_suitable=false."""
